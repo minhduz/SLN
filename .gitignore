@@ -1,0 +1,71 @@
+# --------------------
+# Python
+# --------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Django stuff
+*.log
+*.pot
+*.pyc
+*.sqlite3
+db.sqlite3
+media/
+staticfiles/
+celerybeat-schedule
+
+# Local environment variables
+.env
+*.env
+
+# --------------------
+# Docker
+# --------------------
+/data/
+/volumes/
+*.pid
+
+# Don't commit docker build artifacts
+*.tar
+*.img
+*.pid
+*.seed
+*.bak
+
+# --------------------
+# IDE / Editor
+# --------------------
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VSCode
+.vscode/
+
+# --------------------
+# OS
+# --------------------
+.DS_Store
+Thumbs.db
+
+# --------------------
+# Others
+# --------------------
+/__pycache__/
+/*.swp
