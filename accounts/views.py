@@ -5,7 +5,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .models import User
-from .serializers import RegisterSerializer, UserSerializer, CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer, LogoutSerializer, UserProfileSerializer
+from .serializers import (RegisterSerializer, UserSerializer,
+                          CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer,
+                          LogoutSerializer, UserProfileSerializer
+                          ,UpdateUserSerializer)
 
 from .services.user_service import UserService
 class RegisterView(generics.CreateAPIView):
@@ -36,3 +39,10 @@ class UserProfileView(generics.RetrieveAPIView):
 
     def get_object(self):
         return UserService.get_my_profile(self.request.user)
+
+class UpdateUserView(generics.UpdateAPIView):
+    serializer_class = UpdateUserSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user

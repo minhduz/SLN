@@ -25,15 +25,15 @@ class User(AbstractBaseUser, PermissionsMixin):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     username = models.CharField(max_length=50, unique=True)
     email = models.EmailField(unique=True)
-    password = models.CharField(max_length=255) #stores hashes password
+    phone = models.CharField(max_length=20, unique=True, blank=True, null=True)
+    password = models.CharField(max_length=255)
     full_name = models.CharField(max_length=255, blank=True)
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
     bio = models.TextField(blank=True)
     role = models.CharField(max_length=20, choices=[
         ("student", "Student"),
         ("pupil", "Pupil"),
-        ("teacher", "Teacher"),
-        ("admin", "Admin"),
+        ("teacher", "Teacher")
     ])
     points = models.IntegerField(default=0)
     daily_ai_usage = models.IntegerField(default=0)

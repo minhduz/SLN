@@ -177,7 +177,8 @@ STORAGES = {
         "OPTIONS": {},
     },
 }
-
+DEFAULT_FILE_STORAGE = "storages.backends.s3.S3Storage"
+STATICFILES_STORAGE = "storages.backends.s3.S3Storage"
 
 CELERY_BROKER_URL = f"redis://{env('REDIS_HOST')}:{env('REDIS_PORT')}/{env('REDIS_DB')}"
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL

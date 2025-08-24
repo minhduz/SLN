@@ -20,13 +20,13 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["username", "email", "password", "full_name", "role", "avatar"]
+        fields = ["username", "email", "phone", "password", "full_name", "role", "avatar"]
 
     def create(self, validated_data):
         return create_user(validated_data)
 
 class UpdateUserSerializer(serializers.ModelSerializer):
-    avatar = serializers.ImageField(write_only=True, required=False)
+    avatar = serializers.ImageField(required=False)
 
     class Meta:
         model = User
@@ -74,4 +74,4 @@ class LogoutSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["username", "email", "full_name", "avatar","bio","role","points"]
+        fields = ["username", "email", "phone", "full_name", "avatar","bio","role","points"]

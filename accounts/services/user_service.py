@@ -4,6 +4,16 @@ import uuid
 from django.core.files.storage import default_storage
 from ..tasks import delete_avatar_task
 
+def rename_and_save_avatar(user: User, avatar):
+    """
+    Save avatar with a deterministic filename based on user.id,
+    ensuring consistency across create and update.
+    """
+    ext = os.path.splitext(avatar.name)[1].lower()
+    avatar_filename = f"avatars/{user.id}{ext}"
+    saved_path = default_storage.save(avatar_filename, avatar)
+    return saved_path
+
 def create_user(validated_data):
     avatar = validated_data.pop("avatar", None)
     password = validated_data.pop("password")
@@ -12,29 +22,32 @@ def create_user(validated_data):
     user.save()
 
     if avatar:
-        # Get extension (.png, .jpg, etc.)
-        ext = os.path.splitext(avatar.name)[1].lower()
-        # Build filename based on user.id
-        avatar_filename = f"avatars/{user.id}{ext}"
-        # Save to storage (S3 if configured)
-        saved_path = default_storage.save(avatar_filename, avatar)
-        # Store the S3 URL in DB
+        saved_path = rename_and_save_avatar(user, avatar)
         user.avatar.name = saved_path
         user.save()
 
     return user
 
 def update_user(user, data):
-    old_avatar = user.avatar  # keep ref for cleanup if needed
+    avatar = data.pop("avatar", None)
+
+    # Always fetch from DB, not from the in-memory user
+    old_avatar = None
+    if avatar and user.pk:
+        old_avatar = User.objects.only("avatar").get(pk=user.pk).avatar
 
     for attr, value in data.items():
         setattr(user, attr, value)
 
-    user.save()
+    if avatar:
+        saved_path = rename_and_save_avatar(user, avatar)
+        user.avatar.name = saved_path
 
-    # enqueue async deletion of old avatar if replaced
-    if "avatar" in data and old_avatar:
-        delete_avatar_task.delay(old_avatar.name)  # use .name for S3 path
+        # async cleanup old avatar
+        if old_avatar:
+            delete_avatar_task.delay(old_avatar.name)
+
+    user.save()
     return user
 
 class UserService:
