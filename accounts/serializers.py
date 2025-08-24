@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import InvalidToken
@@ -12,13 +13,14 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         exclude = ["password"]
 
+
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
-    avatar = serializers.ImageField(write_only=True, required=False)
+    avatar = serializers.ImageField(required=False)
 
     class Meta:
         model = User
-        fields = ["username", "email", "password", "full_name", "role", "avatar", "avatar_url"]
+        fields = ["username", "email", "password", "full_name", "role", "avatar"]
 
     def create(self, validated_data):
         return create_user(validated_data)
@@ -28,7 +30,7 @@ class UpdateUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["full_name", "avatar", "avatar_url", "bio"]
+        fields = ["full_name", "avatar", "bio"]
 
     def update(self, instance, validated_data):
         return update_user(instance, validated_data)
@@ -72,4 +74,4 @@ class LogoutSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["username", "email", "full_name", "avatar_url","bio","role","points"]
+        fields = ["username", "email", "full_name", "avatar","bio","role","points"]
