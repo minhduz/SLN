@@ -27,7 +27,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
     password = models.CharField(max_length=255) #stores hashes password
     full_name = models.CharField(max_length=255, blank=True)
-    avatar_url = models.URLField(blank=True)
+    avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
     bio = models.TextField(blank=True)
     role = models.CharField(max_length=20, choices=[
         ("student", "Student"),

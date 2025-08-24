@@ -12,12 +12,6 @@ dist/
 build/
 .eggs/
 
-# Virtual environment
-.venv/
-venv/
-ENV/
-env/
-
 # Django stuff
 *.log
 *.pot
@@ -27,10 +21,6 @@ db.sqlite3
 media/
 staticfiles/
 celerybeat-schedule
-
-# Local environment variables
-.env
-*.env
 
 # --------------------
 # Docker

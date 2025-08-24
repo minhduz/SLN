@@ -1,5 +1,7 @@
 from ..models import User
-from .storage_service import upload_avatar_to_s3
+import os
+import uuid
+from django.core.files.storage import default_storage
 from ..tasks import delete_avatar_task
 
 def create_user(validated_data):
@@ -7,28 +9,32 @@ def create_user(validated_data):
     password = validated_data.pop("password")
     user = User(**validated_data)
     user.set_password(password)
+    user.save()
 
     if avatar:
-        user.avatar_url = upload_avatar_to_s3(avatar)
+        # Get extension (.png, .jpg, etc.)
+        ext = os.path.splitext(avatar.name)[1].lower()
+        # Build filename based on user.id
+        avatar_filename = f"avatars/{user.id}{ext}"
+        # Save to storage (S3 if configured)
+        saved_path = default_storage.save(avatar_filename, avatar)
+        # Store the S3 URL in DB
+        user.avatar.name = saved_path
+        user.save()
 
-    user.save()
     return user
 
 def update_user(user, data):
-    avatar = data.pop("avatar", None)
-    old_avatar_url = user.avatar_url
+    old_avatar = user.avatar  # keep ref for cleanup if needed
 
     for attr, value in data.items():
         setattr(user, attr, value)
 
-    if avatar:
-        user.avatar_url = upload_avatar_to_s3(avatar)
-
     user.save()
 
-    # enqueue async task
-    if avatar and old_avatar_url:
-        delete_avatar_task.delay(old_avatar_url)
+    # enqueue async deletion of old avatar if replaced
+    if "avatar" in data and old_avatar:
+        delete_avatar_task.delay(old_avatar.name)  # use .name for S3 path
     return user
 
 class UserService:
