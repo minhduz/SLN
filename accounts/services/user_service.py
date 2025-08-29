@@ -1,8 +1,11 @@
-from ..models import User
 import os
-import uuid
+
+from django.conf import settings
+from ..models import User
+
 from django.core.files.storage import default_storage
 from ..tasks import delete_avatar_task
+from .otp_service import issue_otp, verify_otp, normalize_phone_to_e164
 
 def rename_and_save_avatar(user: User, avatar):
     """
@@ -57,3 +60,29 @@ class UserService:
         Return current user profile.
         """
         return user
+
+    @staticmethod
+    def send_otp(phone: str, purpose: str):
+        try:
+            phone_e164 = issue_otp(phone, purpose)
+        except ValueError:
+            raise ValueError("Invalid phone")
+
+        return {"message": f"OTP sent to {phone_e164}"}
+
+    @staticmethod
+    def verify_otp(phone: str, code: str):
+        ok = verify_otp(phone, code)
+        if not ok:
+            return False
+
+        try:
+            phone_e164 = normalize_phone_to_e164(phone)
+            user = User.objects.filter(phone=phone_e164).first()
+            if user:
+                user.is_active = True  # or user.phone_verified = True
+                user.save(update_fields=["is_active"])
+        except Exception:
+            pass
+
+        return True

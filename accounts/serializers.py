@@ -8,6 +8,8 @@ from .models import User
 from .services.user_service import create_user, update_user
 from .services.auth_service import generate_and_store_tokens, refresh_tokens, revoke_refresh_token
 
+PURPOSES = ("signup", "password_reset", "phone_change")
+
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -20,7 +22,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["username", "email", "phone", "password", "full_name", "role", "avatar"]
+        fields = ["username", "email", "phone", "password", "full_name", "role", "dob", "avatar"]
 
     def create(self, validated_data):
         return create_user(validated_data)
@@ -74,4 +76,15 @@ class LogoutSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["username", "email", "phone", "full_name", "avatar","bio","role","points"]
+        fields = ["username", "email", "phone", "full_name", "avatar","bio","dob","role","points"]
+
+
+class SendOTPSerializer(serializers.Serializer):
+    phone = serializers.CharField()
+    purpose = serializers.ChoiceField(choices=[(p, p) for p in PURPOSES])
+
+class VerifyOTPSerializer(serializers.Serializer):
+    phone = serializers.CharField()
+    purpose = serializers.ChoiceField(choices=[(p, p) for p in PURPOSES])
+    code = serializers.CharField()
+

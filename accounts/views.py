@@ -8,9 +8,11 @@ from .models import User
 from .serializers import (RegisterSerializer, UserSerializer,
                           CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer,
                           LogoutSerializer, UserProfileSerializer
-                          ,UpdateUserSerializer)
+                          ,UpdateUserSerializer, SendOTPSerializer, VerifyOTPSerializer)
 
 from .services.user_service import UserService
+
+
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     permission_classes = [AllowAny]
@@ -46,3 +48,34 @@ class UpdateUserView(generics.UpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+class SendOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        ser = SendOTPSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        phone = ser.validated_data["phone"]
+        purpose = ser.validated_data["purpose"]
+
+        try:
+            result = UserService.send_otp(phone, purpose)
+        except ValueError:
+            return Response({"detail": "Invalid phone"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class VerifyOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        ser = VerifyOTPSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        phone = ser.validated_data["phone"]
+        code = ser.validated_data["code"]
+
+        if not UserService.verify_otp(phone, code):
+            return Response({"detail": "Invalid or expired OTP"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"message": "OTP verified"}, status=status.HTTP_200_OK)

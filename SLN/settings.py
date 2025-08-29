@@ -182,3 +182,24 @@ STATICFILES_STORAGE = "storages.backends.s3.S3Storage"
 
 CELERY_BROKER_URL = f"redis://{env('REDIS_HOST')}:{env('REDIS_PORT')}/{env('REDIS_DB')}"
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": f"redis://{env('REDIS_HOST')}:{env('REDIS_PORT')}/{env('REDIS_DB')}",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+
+# --- Twilio / OTP settings ---
+TWILIO_ACCOUNT_SID = env("TWILIO_ACCOUNT_SID", default=None)
+TWILIO_AUTH_TOKEN = env("TWILIO_AUTH_TOKEN", default=None)
+TWILIO_FROM_NUMBER = env("TWILIO_FROM_NUMBER", default=None)
+TWILIO_VERIFY_SID = env("TWILIO_VERIFY_SID", default=None)
+
+OTP_TTL_SECONDS = int(env("OTP_TTL_SECONDS", default=300))
+OTP_LENGTH = int(env("OTP_LENGTH", default=6))
+OTP_MAX_ATTEMPTS = int(env("OTP_MAX_ATTEMPTS", default=5))
+OTP_RATE_LIMIT_PER_MIN = int(env("OTP_RATE_LIMIT_PER_MIN", default=3))
