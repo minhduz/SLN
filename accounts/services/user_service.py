@@ -1,7 +1,7 @@
 import os
 
 from django.conf import settings
-from ..models import User
+from ..models import User, UserVerification
 
 from django.core.files.storage import default_storage
 from ..tasks import delete_avatar_task
@@ -79,10 +79,14 @@ class UserService:
         try:
             phone_e164 = normalize_phone_to_e164(phone)
             user = User.objects.filter(phone=phone_e164).first()
-            if user:
-                user.is_active = True  # or user.phone_verified = True
+
+            if user and not user.is_active:
+                # Activate the user account after successful OTP verification
+                user.is_active = True
                 user.save(update_fields=["is_active"])
-        except Exception:
-            pass
+
+        except Exception as e:
+            print(f"Error in verify_otp: {e}")
+            return False
 
         return True

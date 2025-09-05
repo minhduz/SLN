@@ -39,7 +39,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     points = models.IntegerField(default=0)
     daily_ai_usage = models.IntegerField(default=0)
 
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -58,6 +58,7 @@ class UserVerification(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='verifications')
     method = models.CharField(max_length=20, choices=[
+        ("otp","OTP"),
         ("student_id","Student ID"),
         ("personal_id","Personal ID"),
         ("face","Face"),
