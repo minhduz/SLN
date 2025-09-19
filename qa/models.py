@@ -19,7 +19,7 @@ class Question(models.Model):
     title = models.CharField(max_length=255)
     body = models.TextField()
     is_public = models.BooleanField(default=False)
-    popularity_score = models.IntegerField(default=0)
+    popularity_score = models.PositiveIntegerField(default=0)
     embedding = models.JSONField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

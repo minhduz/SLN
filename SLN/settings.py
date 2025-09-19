@@ -8,6 +8,97 @@ from datetime import timedelta
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Create logs directory if it doesn't exist
+LOGS_DIR = BASE_DIR / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+
+# Logging Configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {asctime} {message}',
+            'style': '{',
+        },
+        'console': {
+            'format': '[{asctime}] {levelname} {name}: {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'console',
+        },
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': LOGS_DIR / 'django.log',
+            'formatter': 'verbose',
+        },
+        'chatbot_file': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': LOGS_DIR / 'chatbot.log',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'qa': {
+            'handlers': ['console', 'chatbot_file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'qa.chatbot_agent': {
+            'handlers': ['console', 'chatbot_file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'langchain': {
+            'handlers': ['chatbot_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'openai': {
+            'handlers': ['chatbot_file'],
+            'level': 'WARNING',  # Only log warnings/errors from OpenAI
+            'propagate': False,
+        },
+    },
+}
+
+# Alternative: Simple console logging for development
+if os.getenv('DJANGO_DEBUG', 'False').lower() == 'true':
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+            },
+        },
+        'root': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
+    }
+
 
 # Initialise environment variables
 env = environ.Env(
@@ -155,6 +246,10 @@ REST_FRAMEWORK = {
     ]
 }
 
+CELERY_IMPORTS = ['accounts.tasks',
+                  'qa.tasks'
+]
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),   # e.g. 30 minutes
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),      # e.g. 7 days
@@ -203,7 +298,34 @@ TWILIO_AUTH_TOKEN = env("TWILIO_AUTH_TOKEN", default=None)
 TWILIO_FROM_NUMBER = env("TWILIO_FROM_NUMBER", default=None)
 TWILIO_VERIFY_SID = env("TWILIO_VERIFY_SID", default=None)
 
-OTP_TTL_SECONDS = int(env("OTP_TTL_SECONDS", default=300))
-OTP_LENGTH = int(env("OTP_LENGTH", default=6))
-OTP_MAX_ATTEMPTS = int(env("OTP_MAX_ATTEMPTS", default=5))
-OTP_RATE_LIMIT_PER_MIN = int(env("OTP_RATE_LIMIT_PER_MIN", default=3))
+# OpenAI
+OPENAI_API_KEY= env("OPENAI_API_KEY", default=None)
+EMBEDDING_MODEL= env("EMBEDDING_MODEL", default=None)
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
+OPENAI_API_BASE = os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1')
+
+#Lang Smith
+LANGSMITH_TRACING = os.getenv('LANGSMITH_TRACING', 'false').lower() == 'true'
+LANGSMITH_ENDPOINT = os.getenv('LANGSMITH_ENDPOINT', 'https://api.smith.langchain.com')
+LANGSMITH_API_KEY = os.getenv('LANGSMITH_API_KEY')
+LANGSMITH_PROJECT = os.getenv('LANGSMITH_PROJECT', 'SLN')
+
+#Chatbot Config
+# Chatbot Configuration
+CHATBOT_CONFIG = {
+    'TOKEN_LIMITS': {
+        'MAX_CONVERSATION_TOKENS': int(os.getenv('CHATBOT_MAX_TOKENS', 12000)),
+        'WARNING_TOKENS': int(os.getenv('CHATBOT_WARNING_TOKENS', 10000)),
+        'CRITICAL_TOKENS': int(os.getenv('CHATBOT_CRITICAL_TOKENS', 11500)),
+        'MAX_SINGLE_MESSAGE_TOKENS': int(os.getenv('CHATBOT_MAX_MESSAGE_TOKENS', 2000)),
+    },
+    'MODEL_CONFIG': {
+        'model': OPENAI_MODEL,
+        'temperature': float(os.getenv('CHATBOT_TEMPERATURE', 0)),
+        'max_tokens': int(os.getenv('CHATBOT_MAX_RESPONSE_TOKENS', 1000)),
+    }
+}
+
+
+
+
