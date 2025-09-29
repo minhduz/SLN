@@ -109,10 +109,33 @@ class QuestionSerializer(serializers.ModelSerializer):
 
         return super().create(validated_data)
 
+class QuestionListSerializer(serializers.ModelSerializer):
+    """Serializer for Question model"""
+    user = UserSerializer(read_only=True)
+    subject = SubjectSerializer(read_only=True)
+    subject_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    answer_count = serializers.SerializerMethodField()
+    view_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Question
+        fields = [
+            'id', 'user', 'subject', 'subject_id', 'title', 'body',
+            'is_public', 'popularity_score', 'answer_count', 'view_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'user', 'popularity_score', 'created_at', 'updated_at']
+
+    def get_answer_count(self, obj):
+        return obj.answers.count()
+
+    def get_view_count(self, obj):
+        return obj.views.count()
+
 class UserQuestionViewSerializer(serializers.ModelSerializer):
     """Serializer for User Question Views"""
     user = UserSerializer(read_only=True)
-    question = serializers.StringRelatedField()
+    question = QuestionListSerializer(read_only=True)
 
     class Meta:
         model = UserQuestionView

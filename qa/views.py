@@ -1,5 +1,5 @@
-import random
-from rest_framework import status
+
+from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -14,6 +14,7 @@ from .models import Subject, Question, Answer, QuestionFileAttachment, UserQuest
 from .tasks import generate_question_embedding
 
 from .services.chatbot_agent import get_chatbot
+from .services.question_service import get_random_questions_for_user,get_random_questions_by_subject
 
 from .services.vector_search_service import VectorSearchService
 from .serializers import (
@@ -26,7 +27,8 @@ from .serializers import (
     SaveConversationRequestSerializer, SaveConversationResponseSerializer,
     QuestionSerializer,
     AnswerSerializer,
-    QuestionFileAttachmentSerializer
+    QuestionListSerializer,
+    UserQuestionViewSerializer
 )
 
 logger = logging.getLogger(__name__)
@@ -626,50 +628,257 @@ class DisproveAnswerView(APIView):
 class RandomQuestionsView(APIView):
     """
     GET /api/qa/questions/random/
-    Get N random public questions (default 10, max 50)
+    Get random public questions for the authenticated user
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """Get random public questions"""
         try:
-            limit = int(request.query_params.get('limit', 10))
-            limit = min(max(limit, 1), 50)  # Between 1 and 50
+            limit = int(request.query_params.get("limit", 10))
+            limit = min(max(limit, 1), 50)  # constrain 1–50
 
-            # Get all public question IDs
-            question_ids = list(
-                Question.objects.filter(is_public=True).values_list('id', flat=True)
+            questions = get_random_questions_for_user(request.user.id, limit=limit)
+
+            serializer = QuestionListSerializer(
+                questions, many=True, context={"request": request}
             )
 
-            if not question_ids:
-                return Response(
-                    {"count": 0, "results": []},
-                    status=status.HTTP_200_OK
-                )
+            return Response(
+                {
+                    "count": len(serializer.data),
+                    "results": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
 
-            # Pick random IDs (up to limit)
-            chosen_ids = random.sample(question_ids, min(limit, len(question_ids)))
+        except Exception as e:
+            logger.error(f"Error fetching random questions: {str(e)}")
+            return Response(
+                {"error": "Failed to fetch random questions"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-            # Fetch the questions
-            questions = Question.objects.filter(id__in=chosen_ids)
 
-            serializer = QuestionSerializer(
+class QuestionsBySubjectView(APIView):
+    """
+    GET /api/qa/questions/by-subject/?subject_id=<uuid>&limit=5
+    Get random public questions by subject
+    """
+    def get(self, request):
+        try:
+            subject_id = request.query_params.get('subject_id')
+            subject = get_object_or_404(Subject, id=subject_id)
+
+            limit = int(request.query_params.get('limit', 10))
+            limit = min(max(limit, 1), 50)
+
+            questions = get_random_questions_by_subject(subject.id, limit=limit)
+
+            serializer = QuestionListSerializer(
                 questions,
                 many=True,
                 context={'request': request}
             )
 
             return Response({
+                'subject': {
+                    'id': str(subject.id),
+                    'name': subject.name,
+                    'description': subject.description
+                },
                 'count': len(serializer.data),
                 'results': serializer.data
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error fetching random questions: {str(e)}")
+            logger.error(f"Error fetching random questions by subject: {str(e)}")
             return Response(
-                {'error': 'Failed to fetch random questions'},
+                {'error': 'Failed to fetch questions by subject'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class QuestionView(APIView):
+    """
+    GET /api/qa/question/
+    Get detailed information about a question
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get question details"""
+        try:
+            question_id = request.query_params.get('question_id')
+            question = get_object_or_404(Question, id=question_id)
+
+            # Check permissions - public or owner
+            if not question.is_public and question.user != request.user:
+                return Response(
+                    {'error': 'Permission denied. This question is private.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            serializer = QuestionSerializer(question, context={'request': request})
+
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error fetching question detail: {str(e)}")
+            return Response(
+                {'error': 'Failed to fetch question details'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    """
+    DELETE /api/qa/question/
+    Delete question
+    """
+    def delete(self, request):
+        """
+        Delete question, answers, and attachments
+        Uses django-storages for S3 file cleanup
+        """
+        try:
+            question_id = request.query_params.get('question_id')
+            question = get_object_or_404(Question, id=question_id)
+
+            # Only question owner can delete
+            if question.user != request.user:
+                return Response(
+                    {'error': 'Only the question owner can delete this question'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            with transaction.atomic():
+                # Get counts before deletion
+                answer_count = question.answers.count()
+                attachment_count = question.attachments.count()
+
+                # Get all attachments for S3 cleanup
+                attachments = list(question.attachments.all())
+
+                # Delete files from S3 using django-storages
+                deleted_files = []
+                failed_files = []
+
+                for attachment in attachments:
+                    if attachment.file:
+                        try:
+                            # django-storages handles S3 deletion automatically
+                            attachment.file.delete(save=False)
+                            deleted_files.append(attachment.file.name)
+                            logger.info(f"Deleted S3 file: {attachment.file.name}")
+                        except Exception as e:
+                            logger.error(f"Failed to delete S3 file {attachment.file.name}: {str(e)}")
+                            failed_files.append(attachment.file.name)
+
+                # Delete the question (CASCADE will delete answers and attachments)
+                question.delete()
+
+                logger.info(
+                    f"Question {question_id} deleted by user {request.user.id}. "
+                    f"Removed {answer_count} answers and {attachment_count} attachments"
+                )
+
+                return Response({
+                    'success': True,
+                    'message': 'Question deleted successfully',
+                    'deleted_answers': answer_count,
+                    'deleted_attachments': attachment_count,
+                    'deleted_s3_files': len(deleted_files),
+                    'failed_s3_files': len(failed_files)
+                }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error deleting question: {str(e)}")
+            return Response(
+                {'error': 'Failed to delete question', 'details': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class QuestionVisibilityView(APIView):
+    """
+    PATCH /api/qa/questions/visibility/
+    Toggle question visibility (public/private) - only by owner
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        """
+        Update question visibility
+
+        Request body:
+        {
+            "is_public": true/false
+        }
+        """
+        try:
+            question_id = request.query_params.get('question_id')
+            question = get_object_or_404(Question, id=question_id)
+
+            # Only question owner can change visibility
+            if question.user != request.user:
+                return Response(
+                    {'error': 'Only the question owner can change visibility'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            is_public = request.data.get('is_public')
+            if is_public is None:
+                return Response(
+                    {'error': 'is_public field is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            question.is_public = bool(is_public)
+            question.save()
+
+            logger.info(
+                f"Question {question_id} visibility changed to "
+                f"{'public' if is_public else 'private'} by user {request.user.id}"
+            )
+
+            return Response({
+                'success': True,
+                'message': f"Question is now {'public' if is_public else 'private'}",
+                'is_public': question.is_public
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error updating question visibility: {str(e)}")
+            return Response(
+                {'error': 'Failed to update question visibility'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class UserQuestionViewAPI(generics.GenericAPIView):
+    """API to record when a user views a question (no duplicates)."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserQuestionViewSerializer
+
+    def post(self, request):
+        user = request.user
+        try:
+            question_id = request.data.get('question_id')
+            question = Question.objects.get(id=question_id, is_public=True)
+        except Question.DoesNotExist:
+            return Response({"detail": "Question not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Create or get existing view
+        view_obj, created = UserQuestionView.objects.get_or_create(
+            user=user, question=question
+        )
+
+        # Return the question with updated view_count
+        question_data = QuestionListSerializer(question, context={'request': request}).data
+        return Response(question_data, status=status.HTTP_200_OK)
+
+
+
+
+
 
 
 

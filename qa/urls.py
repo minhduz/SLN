@@ -11,7 +11,12 @@ from .views import (SimilarQuestionsView,
                     AnswerListCreateView,
                     AnswerDetailView,
                     VerifyAnswerView,
-                    DisproveAnswerView)
+                    DisproveAnswerView,
+                    RandomQuestionsView,
+                    QuestionsBySubjectView,
+                    QuestionView,
+                    QuestionVisibilityView,
+                    UserQuestionViewAPI)
 
 # Phase 1: Vector Similarity Search URLs
 urlpatterns = [
@@ -33,6 +38,11 @@ urlpatterns = [
     # Question endpoint
     path('verify-answer/', VerifyAnswerView.as_view(), name='verify-answer'),
     path('disprove-answer/', DisproveAnswerView.as_view(), name='disprove-answer'),
+    path('questions/random/', RandomQuestionsView.as_view(), name='random-questions'),
+    path('questions/subject/', QuestionsBySubjectView.as_view(), name='questions-subject'),
+    path('question/', QuestionView.as_view(), name='question'),
+    path('question-visibility/', QuestionVisibilityView.as_view(), name='question-visibility'),
+    path('view-question/', UserQuestionViewAPI.as_view(), name='view-question'),
 
     # Temporary testing endpoints
     path('temp/create-question/', TempCreateQuestionView.as_view(), name='temp-create-question'),
