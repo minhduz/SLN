@@ -257,77 +257,169 @@ class UserQuestionViewSerializer(serializers.ModelSerializer):
 # CHATBOT SERIALIZERS
 # =============================================================================
 
-class ChatMessageSerializer(serializers.Serializer):
-    """Serializer for chat messages"""
-    message = serializers.CharField(max_length=5000, required=True)
-    thread_id = serializers.CharField(max_length=255, required=False, allow_blank=True)
+# =============================================================================
+# CHATBOT SERIALIZERS
+# =============================================================================
 
-    def validate_message(self, value):
-        if not value.strip():
-            raise serializers.ValidationError("Message cannot be empty")
-        return value.strip()
+# File validation
+def validate_file_size(file):
+    """Validate file size (10MB max)"""
+    max_size = 10 * 1024 * 1024  # 10MB
+    if file.size > max_size:
+        raise serializers.ValidationError(
+            f"File {file.name} is too large. Maximum size is 10MB."
+        )
+
+
+def validate_file_type(file):
+    """Validate file type"""
+    allowed_types = [
+        'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/jpg',
+        'application/pdf', 'text/plain', 'text/csv',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ]
+
+    if file.content_type not in allowed_types:
+        raise serializers.ValidationError(
+            f"File type {file.content_type} is not supported for {file.name}."
+        )
+
+
+# --- ChatWithBot ---
+class ChatWithBotRequestSerializer(serializers.Serializer):
+    message = serializers.CharField(required=True, max_length=2000)
+    thread_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    files = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        allow_empty=True,
+        max_length=5  # Maximum 5 files
+    )
+
+    def validate_files(self, files):
+        """Validate uploaded files"""
+        if not files:
+            return files
+
+        # Check number of files
+        if len(files) > 5:
+            raise serializers.ValidationError("Maximum 5 files allowed.")
+
+        # Validate each file
+        for file in files:
+            validate_file_size(file)
+            validate_file_type(file)
+
+        return files
+
+
+class AttachmentInfoSerializer(serializers.Serializer):
+    """Serializer for attachment information in responses"""
+    filename = serializers.CharField()
+    content_type = serializers.CharField()
+    size = serializers.IntegerField()
+    processed = serializers.BooleanField()
 
 
 class TokenStatusSerializer(serializers.Serializer):
-    """Serializer for token status details"""
-    current_tokens = serializers.IntegerField()
-    max_tokens = serializers.IntegerField()
-    warning_threshold = serializers.IntegerField()
-    critical_threshold = serializers.IntegerField()
-    usage_percentage = serializers.FloatField()
-    status = serializers.ChoiceField(choices=['normal', 'warning', 'critical'])
-    should_start_new_chat = serializers.BooleanField()
-    warning_message = serializers.CharField(allow_null=True, required=False)
+    current_tokens = serializers.IntegerField(required=False)
+    max_tokens = serializers.IntegerField(required=False)
+    warning_threshold = serializers.IntegerField(required=False)
+    critical_threshold = serializers.IntegerField(required=False)
+    usage_percentage = serializers.FloatField(required=False)
+    status = serializers.CharField(required=False)
+    should_start_new_chat = serializers.BooleanField(required=False)
+    warning_message = serializers.CharField(required=False, allow_null=True)
 
 
 class TokenInfoSerializer(serializers.Serializer):
-    """Serializer for token information"""
-    message_tokens = serializers.IntegerField()
-    conversation_tokens = serializers.IntegerField()
+    message_tokens = serializers.IntegerField(required=False)
+    conversation_tokens = serializers.IntegerField(required=False)
     total_tokens = serializers.IntegerField(required=False)
-    token_status = TokenStatusSerializer()
+    max_message_tokens = serializers.IntegerField(required=False)  # appears in some error cases
+    token_status = TokenStatusSerializer(required=False)
 
 
-class ChatResponseSerializer(serializers.Serializer):
-    """Serializer for chat responses with token information"""
+class ChatWithBotResponseSerializer(serializers.Serializer):
     message = serializers.CharField()
     response = serializers.CharField()
     thread_id = serializers.CharField()
     status = serializers.CharField()
+    token_info = TokenInfoSerializer()
     timestamp = serializers.DateTimeField()
-    token_info = TokenInfoSerializer(required=False)
     action_required = serializers.CharField(required=False)
+    current_subject = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    subject_change_detected = serializers.BooleanField(required=False, default=False)
+    suggested_new_subject = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    attachments = AttachmentInfoSerializer(many=True, required=False)
+
+
+# --- GetConversationStatus ---
+class GetConversationStatusRequestSerializer(serializers.Serializer):
+    thread_id = serializers.CharField(required=True, max_length=255)
+
+
+class ConversationStatusAttachmentSerializer(serializers.Serializer):
+    """Attachment info for conversation status"""
+    filename = serializers.CharField()
+    content_type = serializers.CharField()
+    size = serializers.IntegerField()
 
 
 class ConversationStateSerializer(serializers.Serializer):
-    """Serializer for conversation state with token information"""
-    summary = serializers.CharField()
-    message_count = serializers.IntegerField()
-    conversation_tokens = serializers.IntegerField()
-    token_status = TokenStatusSerializer()
+    summary = serializers.CharField(required=False, allow_blank=True)
+    message_count = serializers.IntegerField(required=False)
+    conversation_tokens = serializers.IntegerField(required=False)
+    token_status = TokenStatusSerializer(required=False)
+    attachments = ConversationStatusAttachmentSerializer(many=True, required=False)
     status = serializers.CharField()
 
 
-class SaveQuestionAnswerSerializer(serializers.Serializer):
-    """Serializer for saving question-answer pairs"""
-    title = serializers.CharField(max_length=255, required=True)
-    question_body = serializers.CharField(required=True)
-    answer_content = serializers.CharField(required=True)
-    subject_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    is_public = serializers.BooleanField(default=False)
-    is_ai_generated = serializers.BooleanField(default=True)
+# --- ClearConversation ---
+class ClearConversationRequestSerializer(serializers.Serializer):
+    thread_id = serializers.CharField(required=True, max_length=255)
 
-    def validate_title(self, value):
+
+class ClearConversationResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    message = serializers.CharField(required=False)
+
+
+# --- SaveConversation ---
+class SaveConversationRequestSerializer(serializers.Serializer):
+    thread_id = serializers.CharField(required=True, max_length=255)
+
+    def validate_thread_id(self, value):
         if not value.strip():
-            raise serializers.ValidationError("Title cannot be empty")
+            raise serializers.ValidationError("Thread Id cannot be empty")
         return value.strip()
 
-    def validate_question_body(self, value):
+
+class SavedAttachmentSerializer(serializers.Serializer):
+    """Serializer for saved attachment information"""
+    filename = serializers.CharField()
+    url = serializers.URLField()
+
+
+class SaveConversationResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    message = serializers.CharField(required=False)
+    question_id = serializers.CharField(required=False, allow_null=True)
+    saved_attachments = SavedAttachmentSerializer(many=True, required=False)
+
+
+# --- DiscardConversation ---
+class DiscardConversationRequestSerializer(serializers.Serializer):
+    thread_id = serializers.CharField(required=True, max_length=255)
+
+    def validate_thread_id(self, value):
         if not value.strip():
-            raise serializers.ValidationError("Question body cannot be empty")
+            raise serializers.ValidationError("Thread Id cannot be empty")
         return value.strip()
 
-    def validate_answer_content(self, value):
-        if not value.strip():
-            raise serializers.ValidationError("Answer content cannot be empty")
-        return value.strip()
+
+class DiscardConversationResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    message = serializers.CharField(required=False)
+

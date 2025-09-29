@@ -30,7 +30,7 @@ class Question(models.Model):
 class QuestionFileAttachment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="attachments")
-    file = models.FileField(upload_to="question_attachments/")  # files saved under MEDIA_ROOT/question_attachments/
+    file = models.FileField(upload_to="question_attachments/", max_length=255)  # files saved under MEDIA_ROOT/question_attachments/
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     def __str__(self):

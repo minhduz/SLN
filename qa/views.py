@@ -21,7 +21,10 @@ from .serializers import (
     VectorSearchRequestSerializer,
     VectorSearchResponseSerializer,
     CreateQuestionSerializer,
-    QuestionCreatedResponseSerializer
+    ChatWithBotRequestSerializer, ChatWithBotResponseSerializer,
+    GetConversationStatusRequestSerializer, DiscardConversationRequestSerializer,
+    ClearConversationRequestSerializer, ClearConversationResponseSerializer,
+    SaveConversationRequestSerializer, SaveConversationResponseSerializer, DiscardConversationResponseSerializer
 )
 
 logger = logging.getLogger(__name__)
@@ -421,67 +424,194 @@ class TempBulkCreateQuestionsView(APIView):
         )
 
 
-
 class ChatWithBotView(APIView):
     """
-    API endpoint to chat with the Smart Learning System chatbot
+    API endpoint to chat with the Smart Learning System chatbot with file upload support
 
     POST /api/chat/
-    {
-        "message": "What is photosynthesis?",
-        "thread_id": "optional-thread-id"
-    }
+    Content-Type: multipart/form-data
 
-    Returns token information for frontend to show conversation length warnings
+    Form fields:
+    - message: "What is photosynthesis?"
+    - thread_id: "optional-thread-id"
+    - files: [file1, file2, ...] (optional, max 5 files)
+
+    Returns token information and attachment info for frontend
     """
     permission_classes = [IsAuthenticated]
+
     def post(self, request):
         try:
-            data = request.data
-            message = data.get('message', '').strip()
+            # Use request.data for form data instead of JSON
+            serializer = ChatWithBotRequestSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
 
-            if not message:
-                return Response({
-                    'error': 'Message is required'
-                }, status=status.HTTP_400_BAD_REQUEST)
+            message = serializer.validated_data['message'].strip()
+            thread_id = serializer.validated_data.get(
+                'thread_id',
+                f"user_{request.user.id}_default"
+            )
+            uploaded_files = serializer.validated_data.get('files', [])
 
-            # Get thread ID from request or generate one
-            thread_id = data.get('thread_id', f"user_{request.user.id}_default")
+            # Process file attachments
+            file_attachments = []
+            if uploaded_files:
+                chatbot = get_chatbot()
 
-            # Get chatbot instance and process message
-            chatbot = get_chatbot()
+                for uploaded_file in uploaded_files:
+                    try:
+                        # Read file data
+                        file_data = uploaded_file.read()
+
+                        # Create file attachment
+                        attachment = chatbot.create_file_attachment(
+                            file_data=file_data,
+                            filename=uploaded_file.name,
+                            content_type=uploaded_file.content_type
+                        )
+                        file_attachments.append(attachment)
+
+                    except Exception as e:
+                        logger.error(f"Error processing file {uploaded_file.name}: {str(e)}")
+                        return Response(
+                            {
+                                "error": f"Error processing file {uploaded_file.name}",
+                                "details": str(e)
+                            },
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+
+            # Get chatbot and send message
+            if not file_attachments:  # Only get chatbot if not already retrieved above
+                chatbot = get_chatbot()
+
             result = chatbot.chat(
                 message=message,
                 user_id=str(request.user.id),
-                thread_id=thread_id
+                thread_id=thread_id,
+                file_attachments=file_attachments
             )
 
-            # Prepare response based on status
-            if result['status'] == 'conversation_too_long':
-                return Response({
-                    'message': message,
-                    'response': result['response'],
-                    'thread_id': thread_id,
-                    'status': result['status'],
-                    'token_info': result['token_info'],
-                    'timestamp': timezone.now().isoformat(),
-                    'action_required': 'start_new_chat'
-                }, status=status.HTTP_200_OK)
+            response_data = {
+                "message": message,
+                "response": result["response"],
+                "thread_id": thread_id,
+                "status": result["status"],
+                "token_info": result["token_info"],
+                "timestamp": timezone.now(),
+                "current_subject": result.get("current_subject"),
+                "subject_change_detected": result.get("subject_change_detected"),
+                "suggested_new_subject": result.get("suggested_new_subject"),
+                "attachments": result.get("attachments", []),
+            }
 
-            return Response({
-                'message': message,
-                'response': result['response'],
-                'thread_id': thread_id,
-                'status': result['status'],
-                'token_info': result['token_info'],
-                'timestamp': timezone.now().isoformat()
-            }, status=status.HTTP_200_OK)
+            if result["status"] == "conversation_too_long":
+                response_data["action_required"] = "start_new_chat"
+
+            response_serializer = ChatWithBotResponseSerializer(response_data)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error in chat_with_bot: {str(e)}")
-            return Response({
-                'error': 'An error occurred while processing your request',
-                'details': str(e)
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error(f"Error in ChatWithBotView: {str(e)}")
+            return Response(
+                {"error": "An error occurred", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
+class GetConversationStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = GetConversationStatusRequestSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        thread_id = serializer.validated_data["thread_id"]
+
+        try:
+            chatbot = get_chatbot()
+            result = chatbot.get_conversation_state(thread_id=thread_id)
+
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in GetConversationStatusView: {str(e)}")
+            return Response(
+                {"error": "Failed to get conversation state", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ClearConversationView(APIView):  # Fixed typo in class name
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        serializer = ClearConversationRequestSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        thread_id = serializer.validated_data["thread_id"]
+
+        try:
+            chatbot = get_chatbot()
+            result = chatbot.clear_conversation(thread_id=thread_id)
+
+            response_serializer = ClearConversationResponseSerializer(result)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in ClearConversationView: {str(e)}")
+            return Response(
+                {"error": "Failed to clear conversation", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SaveConversationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = SaveConversationRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        thread_id = serializer.validated_data["thread_id"]
+
+        try:
+            chatbot = get_chatbot()
+            # Use save_conversation instead of create_conversation_summary for file handling
+            result = chatbot.save_conversation(
+                thread_id=thread_id,
+                user_id=str(request.user.id)
+            )
+
+            response_serializer = SaveConversationResponseSerializer(result)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in SaveConversationView: {str(e)}")
+            return Response(
+                {"error": "Failed to save conversation", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class DiscardConversationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        thread_id = request.query_params.get("thread_id")
+        if not thread_id:
+            return Response({"error": "thread_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            chatbot = get_chatbot()
+            result = chatbot.delete_conversation_attachments(thread_id=thread_id)
+
+            response_serializer = DiscardConversationResponseSerializer(result)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in DiscardConversationView: {str(e)}")
+            return Response(
+                {"error": "Failed to discard conversation", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

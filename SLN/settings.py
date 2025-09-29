@@ -3,6 +3,7 @@ import os
 
 from pathlib import Path
 from datetime import timedelta
+from celery.schedules import crontab
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -250,8 +251,37 @@ CELERY_IMPORTS = ['accounts.tasks',
                   'qa.tasks'
 ]
 
+CELERY_TIMEZONE = 'UTC'
+
+CELERY_BEAT_SCHEDULE = {
+    # Clean up temp files older than 2 hours, every hour
+    'cleanup-orphaned-temp-files': {
+        'task': 'qa.tasks.cleanup_orphaned_temp_files',
+        'schedule': crontab(minute=0),  # Every hour at minute 0
+    },
+
+    # Monitor storage usage daily at 2 AM
+    'monitor-s3-storage': {
+        'task': 'qa.tasks.monitor_s3_storage_usage',
+        'schedule': crontab(hour=2, minute=0),  # Daily at 2 AM
+    },
+
+    # Validate permanent attachments weekly
+    'validate-permanent-attachments': {
+        'task': 'qa.tasks.validate_permanent_attachments',
+        'schedule': crontab(hour=3, minute=0, day_of_week=0),  # Weekly on Sunday at 3 AM
+    },
+
+    # More aggressive cleanup during peak hours (optional)
+    'aggressive-temp-cleanup': {
+        'task': 'qa.tasks.cleanup_temp_files_by_age',
+        'schedule': crontab(minute='*/30', hour='9-17'),  # Every 30 min during business hours
+        'kwargs': {'hours_old': 1}  # Clean files older than 1 hour during peak
+    },
+}
+
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),   # e.g. 30 minutes
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=1),   # e.g. 30 minutes
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),      # e.g. 7 days
     "ROTATE_REFRESH_TOKENS": True,                    # optional: new refresh token each time
     "BLACKLIST_AFTER_ROTATION": True,                 # optional: old refresh token becomes invalid

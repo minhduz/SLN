@@ -4,7 +4,10 @@ from .views import (SimilarQuestionsView,
                     TempCreateQuestionView,
                     TempQuestionStatusView,
                     TempBulkCreateQuestionsView,
-                    ChatWithBotView)
+                    ChatWithBotView,
+                    GetConversationStatusView,
+                    DiscardConversationView,
+                    SaveConversationView)
 
 # Phase 1: Vector Similarity Search URLs
 urlpatterns = [
@@ -19,4 +22,7 @@ urlpatterns = [
     path('temp/question-status/<uuid:question_id>/', TempQuestionStatusView.as_view(), name='temp-question-status'),
     path('temp/bulk-create-questions/', TempBulkCreateQuestionsView.as_view(), name='temp-bulk-create-questions'),
     path('chat/', ChatWithBotView.as_view(), name='chat'),
+    path('get-conversation-status/', GetConversationStatusView.as_view(), name='get-conversation-status'),
+    path('discard-conversation/', DiscardConversationView.as_view(), name='discard-conversation'),
+    path('save-conversation/', SaveConversationView.as_view(), name='save-conversation'),
 ]
