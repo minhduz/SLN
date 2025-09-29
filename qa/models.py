@@ -21,6 +21,15 @@ class Question(models.Model):
     is_public = models.BooleanField(default=False)
     popularity_score = models.PositiveIntegerField(default=0)
     embedding = models.JSONField(blank=True, null=True)
+    # New field: Only one answer can be marked as verified by the question owner
+    verified_answer = models.ForeignKey(
+        'Answer',
+        on_delete=models.SET_NULL,
+        related_name='verified_for_question',
+        blank=True,
+        null=True,
+        help_text="The answer marked as most appropriate by the question owner"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -36,6 +45,7 @@ class QuestionFileAttachment(models.Model):
     def __str__(self):
         return f"File for {self.question.title}"
 
+
 class Answer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='answers')
@@ -46,18 +56,12 @@ class Answer(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Answer by {self.user} {self.question}"
+        return f"Answer by {self.user} for {self.question}"
 
-class AnswerVerification(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    answer = models.ForeignKey(Answer, on_delete=models.CASCADE, related_name='verifications')
-    verified_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='answer_verifications')
-    is_verified = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = ('answer', 'verified_by')
+    @property
+    def is_verified(self):
+        """Check if this answer is the verified answer for its question"""
+        return self.question.verified_answer_id == self.id
 
 class UserQuestionView(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

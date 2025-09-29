@@ -1,20 +1,19 @@
+import random
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
 from django.conf import settings
 import logging
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 
 from django.utils import timezone
 
-from .models import Question, Subject
+from .models import Subject, Question, Answer, QuestionFileAttachment, UserQuestionView
 from .tasks import generate_question_embedding
 
 from .services.chatbot_agent import get_chatbot
-
 
 from .services.vector_search_service import VectorSearchService
 from .serializers import (
@@ -22,9 +21,12 @@ from .serializers import (
     VectorSearchResponseSerializer,
     CreateQuestionSerializer,
     ChatWithBotRequestSerializer, ChatWithBotResponseSerializer,
-    GetConversationStatusRequestSerializer, DiscardConversationRequestSerializer,
+    GetConversationStatusRequestSerializer,
     ClearConversationRequestSerializer, ClearConversationResponseSerializer,
-    SaveConversationRequestSerializer, SaveConversationResponseSerializer, DiscardConversationResponseSerializer
+    SaveConversationRequestSerializer, SaveConversationResponseSerializer,
+    QuestionSerializer,
+    AnswerSerializer,
+    QuestionFileAttachmentSerializer
 )
 
 logger = logging.getLogger(__name__)
@@ -159,6 +161,543 @@ class VectorSearchStatsView(APIView):
                 {'error': 'Failed to retrieve statistics'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+class ChatWithBotView(APIView):
+    """
+    API endpoint to chat with the Smart Learning System chatbot with file upload support
+
+    POST /api/chat/
+    Content-Type: multipart/form-data
+
+    Form fields:
+    - message: "What is photosynthesis?"
+    - thread_id: "optional-thread-id"
+    - files: [file1, file2, ...] (optional, max 5 files)
+
+    Returns token information and attachment info for frontend
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            # Use request.data for form data instead of JSON
+            serializer = ChatWithBotRequestSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+
+            message = serializer.validated_data['message'].strip()
+            thread_id = serializer.validated_data.get(
+                'thread_id',
+                f"user_{request.user.id}_default"
+            )
+            uploaded_files = serializer.validated_data.get('files', [])
+
+            # Process file attachments
+            file_attachments = []
+            if uploaded_files:
+                chatbot = get_chatbot()
+
+                for uploaded_file in uploaded_files:
+                    try:
+                        # Read file data
+                        file_data = uploaded_file.read()
+
+                        # Create file attachment
+                        attachment = chatbot.create_file_attachment(
+                            file_data=file_data,
+                            filename=uploaded_file.name,
+                            content_type=uploaded_file.content_type
+                        )
+                        file_attachments.append(attachment)
+
+                    except Exception as e:
+                        logger.error(f"Error processing file {uploaded_file.name}: {str(e)}")
+                        return Response(
+                            {
+                                "error": f"Error processing file {uploaded_file.name}",
+                                "details": str(e)
+                            },
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+
+            # Get chatbot and send message
+            if not file_attachments:  # Only get chatbot if not already retrieved above
+                chatbot = get_chatbot()
+
+            result = chatbot.chat(
+                message=message,
+                user_id=str(request.user.id),
+                thread_id=thread_id,
+                file_attachments=file_attachments
+            )
+
+            response_data = {
+                "message": message,
+                "response": result["response"],
+                "thread_id": thread_id,
+                "status": result["status"],
+                "token_info": result["token_info"],
+                "timestamp": timezone.now(),
+                "current_subject": result.get("current_subject"),
+                "subject_change_detected": result.get("subject_change_detected"),
+                "suggested_new_subject": result.get("suggested_new_subject"),
+                "attachments": result.get("attachments", []),
+            }
+
+            if result["status"] == "conversation_too_long":
+                response_data["action_required"] = "start_new_chat"
+
+            response_serializer = ChatWithBotResponseSerializer(response_data)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in ChatWithBotView: {str(e)}")
+            return Response(
+                {"error": "An error occurred", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class GetConversationStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = GetConversationStatusRequestSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        thread_id = serializer.validated_data["thread_id"]
+
+        try:
+            chatbot = get_chatbot()
+            result = chatbot.get_conversation_state(thread_id=thread_id)
+
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in GetConversationStatusView: {str(e)}")
+            return Response(
+                {"error": "Failed to get conversation state", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class SaveConversationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = SaveConversationRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        thread_id = serializer.validated_data["thread_id"]
+
+        try:
+            chatbot = get_chatbot()
+            # Use save_conversation instead of create_conversation_summary for file handling
+            result = chatbot.save_conversation(
+                thread_id=thread_id,
+                user_id=str(request.user.id)
+            )
+
+            response_serializer = SaveConversationResponseSerializer(result)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in SaveConversationView: {str(e)}")
+            return Response(
+                {"error": "Failed to save conversation", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class ClearConversationView(APIView):
+    """
+    Delete a conversation thread entirely:
+    - Cleans up attachments
+    - Clears all messages
+    """
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        # ✅ Validate input
+        serializer = ClearConversationRequestSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        thread_id = serializer.validated_data["thread_id"]
+
+        try:
+            chatbot = get_chatbot()
+            result = chatbot.cleanup_conversation(thread_id=thread_id)
+
+            # ✅ Serialize response
+            response_serializer = ClearConversationResponseSerializer(result)
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error in ConversationCleanupView: {str(e)}")
+            return Response(
+                {
+                    "error": "Failed to cleanup conversation",
+                    "details": str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+# ============================================================================
+# ANSWER CRUD OPERATIONS
+# ============================================================================
+
+class AnswerListCreateView(APIView):
+    """
+    GET /api/qa/answers/?question_id=<uuid> - List answers for a question
+    POST /api/qa/answers/ - Create a new answer
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """List answers for a specific question"""
+        question_id = request.query_params.get('question_id')
+
+        if not question_id:
+            return Response(
+                {'error': 'question_id parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            question = get_object_or_404(Question, id=question_id)
+            answers = Answer.objects.filter(question=question).order_by('-created_at')
+            serializer = AnswerSerializer(answers, many=True, context={'request': request})
+
+            return Response({
+                'count': answers.count(),
+                'results': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error listing answers: {str(e)}")
+            return Response(
+                {'error': 'Failed to retrieve answers'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def post(self, request):
+        """Create a new answer"""
+        question_id = request.data.get('question_id')
+        content = request.data.get('content')
+
+        if not question_id or not content:
+            return Response(
+                {'error': 'question_id and content are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            question = get_object_or_404(Question, id=question_id)
+
+            # Validate content length
+            if len(content.strip()) < 10:
+                return Response(
+                    {'error': 'Answer content must be at least 10 characters long'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create answer
+            answer = Answer.objects.create(
+                question=question,
+                user=request.user,
+                content=content.strip(),
+                is_ai_generated=False
+            )
+
+            serializer = AnswerSerializer(answer, context={'request': request})
+
+            logger.info(f"Answer {answer.id} created by user {request.user.id} for question {question_id}")
+
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.error(f"Error creating answer: {str(e)}")
+            return Response(
+                {'error': 'Failed to create answer'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class AnswerDetailView(APIView):
+    """
+    GET /api/qa/answers/<uuid>/ - Retrieve a specific answer
+    PUT /api/qa/answers/<uuid>/ - Update an answer
+    DELETE /api/qa/answers/<uuid>/ - Delete an answer
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Retrieve a specific answer"""
+        try:
+            answer_id = request.query_params.get('answer_id')
+            answer = get_object_or_404(Answer, id=answer_id)
+            serializer = AnswerSerializer(answer, context={'request': request})
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error retrieving answer: {str(e)}")
+            return Response(
+                {'error': 'Failed to retrieve answer'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def put(self, request):
+        """Update an answer (only by owner)"""
+        try:
+            answer_id = request.query_params.get('answer_id')
+            answer = get_object_or_404(Answer, id=answer_id)
+
+            # Only the answer owner can update
+            if answer.user != request.user:
+                return Response(
+                    {'error': 'Permission denied. Only the answer owner can update it.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            content = request.data.get('content')
+            if not content:
+                return Response(
+                    {'error': 'content is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Validate content length
+            if len(content.strip()) < 10:
+                return Response(
+                    {'error': 'Answer content must be at least 10 characters long'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            answer.content = content.strip()
+            answer.save()
+
+            serializer = AnswerSerializer(answer, context={'request': request})
+
+            logger.info(f"Answer {answer_id} updated by user {request.user.id}")
+
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error updating answer: {str(e)}")
+            return Response(
+                {'error': 'Failed to update answer'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    def delete(self, request):
+        """Delete an answer (only by owner or question owner)"""
+        try:
+            answer_id = request.query_params.get('answer_id')
+            answer = get_object_or_404(Answer, id=answer_id)
+
+            # Only the answer owner or question owner can delete
+            if answer.user != request.user and answer.question.user != request.user:
+                return Response(
+                    {'error': 'Permission denied'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            answer.delete()
+
+            logger.info(f"Answer {answer_id} deleted by user {request.user.id}")
+
+            return Response(
+                {'message': 'Answer deleted successfully'},
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            logger.error(f"Error deleting answer: {str(e)}")
+            return Response(
+                {'error': 'Failed to delete answer'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class VerifyAnswerView(APIView):
+    """
+    POST /api/qa/questions/<question_id>/verify-answer/
+    Mark an answer as verified (only by question owner)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Verify an answer for a question
+
+        Request body:
+        {
+            "answer_id": "uuid-of-answer"
+        }
+        """
+        try:
+            question_id = request.query_params.get('question_id')
+            question = get_object_or_404(Question, id=question_id)
+
+            # Only question owner can verify answers
+            if question.user != request.user:
+                return Response(
+                    {'error': 'Only the question owner can verify answers'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            answer_id = request.data.get('answer_id')
+            if not answer_id:
+                return Response(
+                    {'error': 'answer_id is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            answer = get_object_or_404(Answer, id=answer_id)
+
+            # Verify answer belongs to this question
+            if answer.question != question:
+                return Response(
+                    {'error': 'Answer does not belong to this question'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Set verified answer
+            question.verified_answer = answer
+            question.save()
+
+            logger.info(f"Answer {answer_id} verified for question {question_id} by user {request.user.id}")
+
+            return Response({
+                'success': True,
+                'message': 'Answer verified successfully',
+                'verified_answer_id': str(answer.id)
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error verifying answer: {str(e)}")
+            return Response(
+                {'error': 'Failed to verify answer', 'details': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class DisproveAnswerView(APIView):
+    """
+    DELETE /api/qa/questions/<question_id>/verify-answer/
+    Remove verified status from question
+    """
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        """Remove verified answer from question"""
+        try:
+            question_id = request.query_params.get('question_id')
+            question = get_object_or_404(Question, id=question_id)
+
+            # Only question owner can disprove
+            if question.user != request.user:
+                return Response(
+                    {'error': 'Only the question owner can disprove answers'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            if not question.verified_answer:
+                return Response(
+                    {'error': 'No verified answer to remove'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            question.verified_answer = None
+            question.save()
+
+            logger.info(f"Verified answer removed from question {question_id} by user {request.user.id}")
+
+            return Response({
+                'success': True,
+                'message': 'Verified answer removed successfully'
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error disproving answer: {str(e)}")
+            return Response(
+                {'error': 'Failed to disprove answer'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class RandomQuestionsView(APIView):
+    """
+    GET /api/qa/questions/random/
+    Get N random public questions (default 10, max 50)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get random public questions"""
+        try:
+            limit = int(request.query_params.get('limit', 10))
+            limit = min(max(limit, 1), 50)  # Between 1 and 50
+
+            # Get all public question IDs
+            question_ids = list(
+                Question.objects.filter(is_public=True).values_list('id', flat=True)
+            )
+
+            if not question_ids:
+                return Response(
+                    {"count": 0, "results": []},
+                    status=status.HTTP_200_OK
+                )
+
+            # Pick random IDs (up to limit)
+            chosen_ids = random.sample(question_ids, min(limit, len(question_ids)))
+
+            # Fetch the questions
+            questions = Question.objects.filter(id__in=chosen_ids)
+
+            serializer = QuestionSerializer(
+                questions,
+                many=True,
+                context={'request': request}
+            )
+
+            return Response({
+                'count': len(serializer.data),
+                'results': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error fetching random questions: {str(e)}")
+            return Response(
+                {'error': 'Failed to fetch random questions'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 class TempCreateQuestionView(APIView):
@@ -422,196 +961,3 @@ class TempBulkCreateQuestionsView(APIView):
             },
             status=status.HTTP_201_CREATED if created_questions else status.HTTP_400_BAD_REQUEST
         )
-
-
-class ChatWithBotView(APIView):
-    """
-    API endpoint to chat with the Smart Learning System chatbot with file upload support
-
-    POST /api/chat/
-    Content-Type: multipart/form-data
-
-    Form fields:
-    - message: "What is photosynthesis?"
-    - thread_id: "optional-thread-id"
-    - files: [file1, file2, ...] (optional, max 5 files)
-
-    Returns token information and attachment info for frontend
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        try:
-            # Use request.data for form data instead of JSON
-            serializer = ChatWithBotRequestSerializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
-
-            message = serializer.validated_data['message'].strip()
-            thread_id = serializer.validated_data.get(
-                'thread_id',
-                f"user_{request.user.id}_default"
-            )
-            uploaded_files = serializer.validated_data.get('files', [])
-
-            # Process file attachments
-            file_attachments = []
-            if uploaded_files:
-                chatbot = get_chatbot()
-
-                for uploaded_file in uploaded_files:
-                    try:
-                        # Read file data
-                        file_data = uploaded_file.read()
-
-                        # Create file attachment
-                        attachment = chatbot.create_file_attachment(
-                            file_data=file_data,
-                            filename=uploaded_file.name,
-                            content_type=uploaded_file.content_type
-                        )
-                        file_attachments.append(attachment)
-
-                    except Exception as e:
-                        logger.error(f"Error processing file {uploaded_file.name}: {str(e)}")
-                        return Response(
-                            {
-                                "error": f"Error processing file {uploaded_file.name}",
-                                "details": str(e)
-                            },
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-
-            # Get chatbot and send message
-            if not file_attachments:  # Only get chatbot if not already retrieved above
-                chatbot = get_chatbot()
-
-            result = chatbot.chat(
-                message=message,
-                user_id=str(request.user.id),
-                thread_id=thread_id,
-                file_attachments=file_attachments
-            )
-
-            response_data = {
-                "message": message,
-                "response": result["response"],
-                "thread_id": thread_id,
-                "status": result["status"],
-                "token_info": result["token_info"],
-                "timestamp": timezone.now(),
-                "current_subject": result.get("current_subject"),
-                "subject_change_detected": result.get("subject_change_detected"),
-                "suggested_new_subject": result.get("suggested_new_subject"),
-                "attachments": result.get("attachments", []),
-            }
-
-            if result["status"] == "conversation_too_long":
-                response_data["action_required"] = "start_new_chat"
-
-            response_serializer = ChatWithBotResponseSerializer(response_data)
-            return Response(response_serializer.data, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"Error in ChatWithBotView: {str(e)}")
-            return Response(
-                {"error": "An error occurred", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class GetConversationStatusView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        serializer = GetConversationStatusRequestSerializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-
-        thread_id = serializer.validated_data["thread_id"]
-
-        try:
-            chatbot = get_chatbot()
-            result = chatbot.get_conversation_state(thread_id=thread_id)
-
-            return Response(result, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"Error in GetConversationStatusView: {str(e)}")
-            return Response(
-                {"error": "Failed to get conversation state", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class ClearConversationView(APIView):  # Fixed typo in class name
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request):
-        serializer = ClearConversationRequestSerializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-
-        thread_id = serializer.validated_data["thread_id"]
-
-        try:
-            chatbot = get_chatbot()
-            result = chatbot.clear_conversation(thread_id=thread_id)
-
-            response_serializer = ClearConversationResponseSerializer(result)
-            return Response(response_serializer.data, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"Error in ClearConversationView: {str(e)}")
-            return Response(
-                {"error": "Failed to clear conversation", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class SaveConversationView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        serializer = SaveConversationRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        thread_id = serializer.validated_data["thread_id"]
-
-        try:
-            chatbot = get_chatbot()
-            # Use save_conversation instead of create_conversation_summary for file handling
-            result = chatbot.save_conversation(
-                thread_id=thread_id,
-                user_id=str(request.user.id)
-            )
-
-            response_serializer = SaveConversationResponseSerializer(result)
-            return Response(response_serializer.data, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"Error in SaveConversationView: {str(e)}")
-            return Response(
-                {"error": "Failed to save conversation", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class DiscardConversationView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request):
-        thread_id = request.query_params.get("thread_id")
-        if not thread_id:
-            return Response({"error": "thread_id is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            chatbot = get_chatbot()
-            result = chatbot.delete_conversation_attachments(thread_id=thread_id)
-
-            response_serializer = DiscardConversationResponseSerializer(result)
-            return Response(response_serializer.data, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"Error in DiscardConversationView: {str(e)}")
-            return Response(
-                {"error": "Failed to discard conversation", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )

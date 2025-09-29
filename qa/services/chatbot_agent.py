@@ -871,24 +871,6 @@ Always maintain a helpful, educational tone and focus on facilitating learning a
             logger.error(f"Error getting conversation state: {str(e)}")
             return {"status": "error", "error": str(e)}
 
-    def clear_conversation(self, thread_id: str = "default") -> Dict[str, Any]:
-        """Clear a conversation thread and clean up attachments"""
-        try:
-            config = {"configurable": {"thread_id": thread_id}}
-
-            # Get current state to clean up attachments
-            try:
-                state = self.graph.get_state(config)
-                attachments = state.values.get("file_attachments", [])
-                self._cleanup_temp_attachments(attachments)
-            except:
-                pass
-
-            return {"status": "success", "message": "Conversation cleared"}
-        except Exception as e:
-            logger.error(f"Error clearing conversation: {str(e)}")
-            return {"status": "error", "error": str(e)}
-
     def save_conversation(self, thread_id: str, user_id: str = None) -> Dict[str, Any]:
         """
         Manually save a conversation with all attachments to the database.
@@ -944,13 +926,13 @@ Always maintain a helpful, educational tone and focus on facilitating learning a
         "subject": "Main subject area (e.g., Mathematics, Physics, Chemistry, Biology, History, etc.)",
         "title": "Brief title summarizing the main question/topic",
         "question_body": "All user questions and requests combined into a coherent question body",
-        "answer_summary": "Comprehensive summary of the AI's responses and explanations throughout the conversation",
+        "answer_summary": "Give the detail answer of all question even it different aspect, not summary",
         "key_topics": ["topic1", "topic2", "topic3"]
     }}
 
     Guidelines:
     - question_body should contain what the user asked about, their questions, and context
-    - answer_summary should be a summary of the AI's educational responses and explanations
+    - answer_summary should be a detail of the AI's educational responses and explanations for each question in the conversation
     - Keep both sections informative but concise"""
 
             analysis_response = self.model.invoke([HumanMessage(content=analysis_prompt)])
@@ -999,34 +981,28 @@ Always maintain a helpful, educational tone and focus on facilitating learning a
         """
         return self.save_conversation(thread_id, user_id)
 
-    def delete_conversation_attachments(self, thread_id: str) -> Dict[str, Any]:
-        """
-        Delete attachments from a conversation without saving.
-        This is useful when user decides not to save the conversation.
-        """
+    def cleanup_conversation(self, thread_id: str) -> Dict[str, Any]:
+        """Delete full conversation: attachments + messages."""
         try:
             config = {"configurable": {"thread_id": thread_id}}
             state = self.graph.get_state(config)
 
+            # 1. Cleanup attachments if any
             if state:
                 attachments = state.values.get("file_attachments", [])
                 self._cleanup_temp_attachments(attachments)
 
-                # Update state to remove attachments
-                self.graph.update_state(config, {
-                    "file_attachments": [],
-                    "temp_attachment_ids": []
-                })
+            # 2. Remove all messages + reset attachments
+            self.graph.update_state(config, {
+                "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)],
+                "file_attachments": [],
+                "temp_attachment_ids": []
+            })
 
-                return {
-                    "status": "success",
-                    "message": f"Cleaned up {len(attachments)} attachments"
-                }
-            else:
-                return {"status": "success", "message": "No attachments to clean up"}
+            return {"status": "success", "message": "Conversation fully cleared"}
 
         except Exception as e:
-            logger.error(f"Error deleting conversation attachments: {str(e)}")
+            logger.error(f"Error cleaning up conversation: {str(e)}")
             return {"status": "error", "error": str(e)}
 
 
