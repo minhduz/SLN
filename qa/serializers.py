@@ -272,6 +272,15 @@ class QuestionCreatedResponseSerializer(serializers.Serializer):
     message = serializers.CharField()
     embedding_task_id = serializers.CharField(required=False)
 
+class UserQuestionMinimalSerializer(serializers.ModelSerializer):
+    """Minimal serializer for user's question list - only title, body, and attachments"""
+    attachments = QuestionFileAttachmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Question
+        fields = ['id', 'title', 'body', 'attachments']
+        read_only_fields = ['id']
+
 # =============================================================================
 # CHATBOT SERIALIZERS
 # =============================================================================
@@ -303,7 +312,7 @@ def validate_file_type(file):
 
 # --- ChatWithBot ---
 class ChatWithBotRequestSerializer(serializers.Serializer):
-    message = serializers.CharField(required=True, max_length=2000)
+    message = serializers.CharField(required=True, max_length=10000)
     thread_id = serializers.CharField(required=False, allow_blank=True, max_length=255)
     files = serializers.ListField(
         child=serializers.FileField(),

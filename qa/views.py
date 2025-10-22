@@ -1,4 +1,3 @@
-
 from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -7,16 +6,22 @@ from django.conf import settings
 import logging
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-
 from django.utils import timezone
+from django.db.models import Q
 
 from .models import Subject, Question, Answer, QuestionFileAttachment, UserQuestionView
 from .tasks import generate_question_embedding
 
 from .services.chatbot_agent import get_chatbot
-from .services.question_service import get_random_questions_for_user,get_random_questions_by_subject
-
+from .services.chatbot_utils import (
+    chat as chatbot_chat,
+    save_conversation as chatbot_save_conversation,
+    cleanup_conversation as chatbot_cleanup_conversation,
+    create_file_attachment
+)
+from .services.question_service import get_random_questions_for_user, get_random_questions_by_subject
 from .services.vector_search_service import VectorSearchService
+
 from .serializers import (
     VectorSearchRequestSerializer,
     VectorSearchResponseSerializer,
@@ -25,10 +30,9 @@ from .serializers import (
     GetConversationStatusRequestSerializer,
     ClearConversationRequestSerializer, ClearConversationResponseSerializer,
     SaveConversationRequestSerializer, SaveConversationResponseSerializer,
-    QuestionSerializer,
-    AnswerSerializer,
-    QuestionListSerializer,
-    UserQuestionViewSerializer
+    QuestionSerializer, AnswerSerializer,
+    QuestionListSerializer, UserQuestionViewSerializer,
+    UserQuestionMinimalSerializer, SubjectSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -193,18 +197,16 @@ class ChatWithBotView(APIView):
             )
             uploaded_files = serializer.validated_data.get('files', [])
 
-            # Process file attachments
+            # Process file attachments using the utility function
             file_attachments = []
             if uploaded_files:
-                chatbot = get_chatbot()
-
                 for uploaded_file in uploaded_files:
                     try:
                         # Read file data
                         file_data = uploaded_file.read()
 
-                        # Create file attachment
-                        attachment = chatbot.create_file_attachment(
+                        # Create file attachment using utility function
+                        attachment = create_file_attachment(
                             file_data=file_data,
                             filename=uploaded_file.name,
                             content_type=uploaded_file.content_type
@@ -221,11 +223,10 @@ class ChatWithBotView(APIView):
                             status=status.HTTP_400_BAD_REQUEST
                         )
 
-            # Get chatbot and send message
-            if not file_attachments:  # Only get chatbot if not already retrieved above
-                chatbot = get_chatbot()
-
-            result = chatbot.chat(
+            # Get chatbot and send message using utility function
+            chatbot = get_chatbot()
+            result = chatbot_chat(
+                chatbot_instance=chatbot,
                 message=message,
                 user_id=str(request.user.id),
                 thread_id=thread_id,
@@ -260,6 +261,10 @@ class ChatWithBotView(APIView):
 
 
 class GetConversationStatusView(APIView):
+    """
+    GET /api/chat/status/
+    Get the current status of a conversation thread
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -282,6 +287,10 @@ class GetConversationStatusView(APIView):
             )
 
 class SaveConversationView(APIView):
+    """
+    POST /api/chat/save/
+    Save a conversation to the database with all attachments
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -292,8 +301,9 @@ class SaveConversationView(APIView):
 
         try:
             chatbot = get_chatbot()
-            # Use save_conversation instead of create_conversation_summary for file handling
-            result = chatbot.save_conversation(
+            # Use the utility function for saving conversation
+            result = chatbot_save_conversation(
+                chatbot_instance=chatbot,
                 thread_id=thread_id,
                 user_id=str(request.user.id)
             )
@@ -310,6 +320,7 @@ class SaveConversationView(APIView):
 
 class ClearConversationView(APIView):
     """
+    DELETE /api/chat/clear/
     Delete a conversation thread entirely:
     - Cleans up attachments
     - Clears all messages
@@ -317,7 +328,7 @@ class ClearConversationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request):
-        # ✅ Validate input
+        # Validate input
         serializer = ClearConversationRequestSerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
 
@@ -325,14 +336,18 @@ class ClearConversationView(APIView):
 
         try:
             chatbot = get_chatbot()
-            result = chatbot.cleanup_conversation(thread_id=thread_id)
+            # Use the utility function for cleanup
+            result = chatbot_cleanup_conversation(
+                chatbot_instance=chatbot,
+                thread_id=thread_id
+            )
 
-            # ✅ Serialize response
+            # Serialize response
             response_serializer = ClearConversationResponseSerializer(result)
             return Response(response_serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error in ConversationCleanupView: {str(e)}")
+            logger.error(f"Error in ClearConversationView: {str(e)}")
             return Response(
                 {
                     "error": "Failed to cleanup conversation",
@@ -628,7 +643,7 @@ class DisproveAnswerView(APIView):
 class RandomQuestionsView(APIView):
     """
     GET /api/qa/questions/random/
-    Get random public questions for the authenticated user
+    Get random public questions for the authenticated user (excluding their own questions)
     """
     permission_classes = [IsAuthenticated]
 
@@ -662,8 +677,10 @@ class RandomQuestionsView(APIView):
 class QuestionsBySubjectView(APIView):
     """
     GET /api/qa/questions/by-subject/?subject_id=<uuid>&limit=5
-    Get random public questions by subject
+    Get random public questions by subject (excluding user's own questions)
     """
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         try:
             subject_id = request.query_params.get('subject_id')
@@ -672,7 +689,9 @@ class QuestionsBySubjectView(APIView):
             limit = int(request.query_params.get('limit', 10))
             limit = min(max(limit, 1), 50)
 
-            questions = get_random_questions_by_subject(subject.id, limit=limit)
+            # Pass authenticated user_id to exclude their own questions
+            user_id = request.user.id
+            questions = get_random_questions_by_subject(subject.id, user_id, limit=limit)
 
             serializer = QuestionListSerializer(
                 questions,
@@ -852,6 +871,41 @@ class QuestionVisibilityView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+class UserQuestionsListView(APIView):
+    """
+    GET /api/qa/user/questions/
+    Get all questions created by the authenticated user
+    Returns only id, title, body, and attachments
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Get all user's questions, newest first
+            questions = Question.objects.filter(
+                user=request.user
+            ).prefetch_related('attachments').order_by('-created_at')
+
+            # Serialize
+            serializer = UserQuestionMinimalSerializer(
+                questions,
+                many=True,
+                context={'request': request}
+            )
+
+            return Response({
+                'success': True,
+                'count': len(serializer.data),
+                'results': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error fetching user questions: {str(e)}")
+            return Response(
+                {'error': 'Failed to fetch user questions'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 class UserQuestionViewAPI(generics.GenericAPIView):
     """API to record when a user views a question (no duplicates)."""
@@ -860,11 +914,19 @@ class UserQuestionViewAPI(generics.GenericAPIView):
 
     def post(self, request):
         user = request.user
+        question_id = request.data.get('question_id')
+
         try:
-            question_id = request.data.get('question_id')
-            question = Question.objects.get(id=question_id, is_public=True)
+            # ✅ Allow viewing if question is public OR user is the owner
+            question = Question.objects.get(
+                Q(is_public=True) | Q(user=user),
+                id=question_id
+            )
         except Question.DoesNotExist:
-            return Response({"detail": "Question not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "Question not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         # Create or get existing view
         view_obj, created = UserQuestionView.objects.get_or_create(
@@ -872,8 +934,94 @@ class UserQuestionViewAPI(generics.GenericAPIView):
         )
 
         # Return the question with updated view_count
-        question_data = QuestionListSerializer(question, context={'request': request}).data
+        question_data = QuestionListSerializer(
+            question,
+            context={'request': request}
+        ).data
         return Response(question_data, status=status.HTTP_200_OK)
+
+
+class SubjectListView(APIView):
+    """
+    GET /api/qa/subjects/
+    Get all available subjects
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get all subjects with their question counts"""
+        try:
+            subjects = Subject.objects.all().order_by('name')
+
+            serializer = SubjectSerializer(subjects, many=True)
+
+            logger.info(f"Retrieved {len(serializer.data)} subjects for user {request.user.id}")
+
+            return Response({
+                'success': True,
+                'count': len(serializer.data),
+                'results': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error fetching subjects: {str(e)}")
+            return Response(
+                {'error': 'Failed to fetch subjects'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SearchSubjectsView(APIView):
+    """
+    GET /api/qa/subjects/search/?q=<query>
+    Search subjects by name or description (case-insensitive contains)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Search subjects using contains query"""
+        try:
+            query = request.query_params.get('q', '').strip()
+
+            if not query:
+                return Response(
+                    {'error': 'Query parameter "q" is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if len(query) < 2:
+                return Response(
+                    {'error': 'Query must be at least 2 characters long'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Search in both name and description using case-insensitive contains
+            subjects = Subject.objects.filter(
+                Q(name__icontains=query)
+            ).order_by('name')
+
+            serializer = SubjectSerializer(subjects, many=True)
+
+            logger.info(
+                f"Subject search by user {request.user.id}: '{query}' "
+                f"- {len(serializer.data)} results"
+            )
+
+            return Response({
+                'success': True,
+                'query': query,
+                'count': len(serializer.data),
+                'results': serializer.data
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error searching subjects: {str(e)}")
+            return Response(
+                {'error': 'Failed to search subjects'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 
 
 

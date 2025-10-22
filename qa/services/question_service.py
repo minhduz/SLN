@@ -2,61 +2,98 @@ import random
 from django.core.cache import cache
 from ..models import Question
 
+
 def get_random_questions_for_user(user_id, limit=10):
     """
-    Return a list of random public questions for a specific user.
-    Uses Redis/Django cache to maintain a 'deck' that prevents repeats
-    until all questions are shown.
+    Return random public questions without duplicates.
+    Maintains a deck and tracks shown questions across multiple calls (pagination).
     """
-    cache_key = f"user:{user_id}:random_questions"
+    deck_key = f"user:{user_id}:question_deck"
+    shown_key = f"user:{user_id}:shown_questions"
 
-    # Get deck from cache
-    question_ids = cache.get(cache_key)
+    # Get current state
+    question_ids = cache.get(deck_key)
+    shown_ids = cache.get(shown_key, set())
 
+    # If deck is empty, rebuild it
     if not question_ids:
-        # Fetch all public question IDs
         all_ids = list(
-            Question.objects.filter(is_public=True).values_list("id", flat=True)
+            Question.objects.filter(is_public=True)
+            .exclude(user_id=user_id)
+            .values_list("id", flat=True)
         )
-        random.shuffle(all_ids)  # shuffle deck
-        question_ids = all_ids
 
-    # Take up to `limit`
+        # CRITICAL: Exclude already shown questions when rebuilding deck
+        available_ids = [qid for qid in all_ids if qid not in shown_ids]
+
+        # If all questions shown, reset the cycle
+        if not available_ids or len(available_ids) < limit:
+            available_ids = all_ids
+            shown_ids = set()  # Fresh start
+
+        random.shuffle(available_ids)
+        question_ids = available_ids
+
+    # Serve next batch
     selected_ids = question_ids[:limit]
     remaining_ids = question_ids[limit:]
 
-    # Update cache (only if there are leftovers)
+    # Track what we just served
+    shown_ids.update(selected_ids)
+
+    # Update cache
     if remaining_ids:
-        cache.set(cache_key, remaining_ids, timeout=3600)  # 1 hour TTL
+        cache.set(deck_key, remaining_ids, timeout=3600)
     else:
-        cache.delete(cache_key)
+        # Deck exhausted - delete so it rebuilds on next call
+        cache.delete(deck_key)
 
-    # Fetch actual questions
-    return Question.objects.filter(id__in=selected_ids)
+    cache.set(shown_key, shown_ids, timeout=3600)
 
-def get_random_questions_by_subject(subject_id, limit=10):
+    # Return questions in selected order
+    questions = Question.objects.filter(id__in=selected_ids)
+    questions_dict = {q.id: q for q in questions}
+    return [questions_dict[qid] for qid in selected_ids if qid in questions_dict]
+
+
+def get_random_questions_by_subject(subject_id, user_id, limit=10):
     """
-    Return a list of random public questions for a specific subject.
-    Works like the user-specific version: shuffled deck until exhausted.
+    Return random questions by subject without duplicates.
     """
-    cache_key = f"subject:{subject_id}:random_questions"
+    deck_key = f"user:{user_id}:subject:{subject_id}:question_deck"
+    shown_key = f"user:{user_id}:subject:{subject_id}:shown_questions"
 
-    question_ids = cache.get(cache_key)
+    question_ids = cache.get(deck_key)
+    shown_ids = cache.get(shown_key, set())
 
     if not question_ids:
         all_ids = list(
             Question.objects.filter(subject_id=subject_id, is_public=True)
+            .exclude(user_id=user_id)
             .values_list("id", flat=True)
         )
-        random.shuffle(all_ids)
-        question_ids = all_ids
+
+        available_ids = [qid for qid in all_ids if qid not in shown_ids]
+
+        if not available_ids or len(available_ids) < limit:
+            available_ids = all_ids
+            shown_ids = set()
+
+        random.shuffle(available_ids)
+        question_ids = available_ids
 
     selected_ids = question_ids[:limit]
     remaining_ids = question_ids[limit:]
 
-    if remaining_ids:
-        cache.set(cache_key, remaining_ids, timeout=3600)
-    else:
-        cache.delete(cache_key)
+    shown_ids.update(selected_ids)
 
-    return Question.objects.filter(id__in=selected_ids)
+    if remaining_ids:
+        cache.set(deck_key, remaining_ids, timeout=3600)
+    else:
+        cache.delete(deck_key)
+
+    cache.set(shown_key, shown_ids, timeout=3600)
+
+    questions = Question.objects.filter(id__in=selected_ids)
+    questions_dict = {q.id: q for q in questions}
+    return [questions_dict[qid] for qid in selected_ids if qid in questions_dict]

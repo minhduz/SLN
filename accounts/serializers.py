@@ -112,7 +112,7 @@ class LogoutSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["username", "email", "phone", "full_name", "avatar","bio","dob","role","points"]
+        fields = ["id","username", "email", "phone", "full_name", "avatar","bio","dob","role","points"]
 
 
 class SendOTPSerializer(serializers.Serializer):

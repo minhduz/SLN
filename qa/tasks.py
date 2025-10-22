@@ -166,7 +166,7 @@ def cleanup_temp_files_by_age(hours_old: int = 2):
                 continue
 
             for obj in page['Contents']:
-                if obj['LastModified'].replace(tzinfo=timezone.utc) < cutoff_time:
+                if obj['LastModified'].astimezone(dt_timezone.utc) < cutoff_time:
                     delete_keys.append({'Key': obj['Key']})
                     total_size += obj['Size']
 

@@ -16,7 +16,10 @@ from .views import (SimilarQuestionsView,
                     QuestionsBySubjectView,
                     QuestionView,
                     QuestionVisibilityView,
-                    UserQuestionViewAPI)
+                    UserQuestionViewAPI,
+                    UserQuestionsListView,
+                    SubjectListView,
+                    SearchSubjectsView,)
 
 # Phase 1: Vector Similarity Search URLs
 urlpatterns = [
@@ -43,6 +46,9 @@ urlpatterns = [
     path('question/', QuestionView.as_view(), name='question'),
     path('question-visibility/', QuestionVisibilityView.as_view(), name='question-visibility'),
     path('view-question/', UserQuestionViewAPI.as_view(), name='view-question'),
+    path('user-questions/', UserQuestionsListView.as_view(), name='user-question'),
+    path('subjects/', SubjectListView.as_view(), name='subject-list'),
+    path('subjects/search/', SearchSubjectsView.as_view(), name='subject-search'),
 
     # Temporary testing endpoints
     path('temp/create-question/', TempCreateQuestionView.as_view(), name='temp-create-question'),
