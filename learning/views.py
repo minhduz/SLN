@@ -1,17 +1,21 @@
 # learning/views.py
+from rest_framework.views import APIView
 from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from django.conf import settings
 import logging
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.db.models import Q
 
 from .models import Quiz, QuizQuestion, QuizAnswerOption, QuizAttempt, QuizAttemptAnswer
 from .serializers import (
     QuizSerializer,
     QuizListSerializer,
     GenerateAIQuizSerializer,
+    SaveGeneratedQuizSerializer,
     QuizQuestionSerializer,
     SubmitQuizSerializer,
     QuizAttemptSerializer,
@@ -20,15 +24,15 @@ from .serializers import (
     CreateQuizSerializer,
     AddManualQuestionSerializer,
     ImportQuestionsFromExcelSerializer,
-    EditQuizSerializer,
-    EditQuestionSerializer,
-    EditAnswerOptionSerializer,
-    UpdateAnswerOptionSerializer,
+    QuizDetailPreviewSerializer,
+    UnifiedEditQuizSerializer
 )
 from .service.quiz_service import AIQuizGenerator
 from .service.submit_service import QuizSubmitService
 from .service.file_service import ExcelQuizImporter
+from .service.random_quiz_service import get_random_quizzes_for_user,get_random_quizzes_by_subject
 from qa.models import Subject
+
 import tempfile
 import os
 
@@ -83,22 +87,49 @@ class QuizOwnershipMixin:
             )
         return None
 
+
 class GenerateAIQuizView(generics.CreateAPIView):
     """
-    API endpoint to generate an AI quiz
+    API endpoint to generate an AI quiz WITHOUT saving to database
+
+    Returns the generated quiz data that can be previewed before saving
 
     POST /api/learning/quiz/generate-ai/
+    Request Body:
     {
         "subject_id": "optional-uuid",
-        "num_questions": 10,
-        "language": "Vietnamese"
+        "num_questions": 15,
+        "language": "English",
+        "description": "Optional custom description",
+        "options_per_question": 2,
+        "correct_answers_per_question": 1
+    }
+
+    Response:
+    {
+        "success": true,
+        "message": "Quiz generated successfully",
+        "num_questions": 15,
+        "language": "English",
+        "options_per_question": 2,
+        "correct_answers_per_question": 1,
+        "quiz_data": {
+            "title": "...",
+            "description": "...",
+            "questions": [...]
+        },
+        "subject": {
+            "id": "...",
+            "name": "...",
+            "description": "..."
+        }
     }
     """
     permission_classes = [IsAuthenticated]
     serializer_class = GenerateAIQuizSerializer
 
     def create(self, request, *args, **kwargs):
-        """Generate and save an AI quiz with flexible question count and language"""
+        """Generate AI quiz without saving to database"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -106,6 +137,9 @@ class GenerateAIQuizView(generics.CreateAPIView):
             subject_id = serializer.validated_data.get('subject_id')
             num_questions = serializer.validated_data.get('num_questions', 10)
             language = serializer.validated_data.get('language', 'English')
+            custom_description = serializer.validated_data.get('description')
+            options_per_question = serializer.validated_data.get('options_per_question', 4)
+            correct_answers_per_question = serializer.validated_data.get('correct_answers_per_question', 1)
 
             # Get subject
             if subject_id:
@@ -113,16 +147,22 @@ class GenerateAIQuizView(generics.CreateAPIView):
             else:
                 subject = None  # Will be randomly selected
 
-            # Generate and save quiz with specified number of questions and language
-            generator = AIQuizGenerator(num_questions=num_questions, language=language)
-            quiz = generator.generate_and_save_quiz(
-                subject,
-                created_by=request.user,)
-            quiz_serializer = QuizSerializer(quiz)
+            # Initialize generator
+            generator = AIQuizGenerator(
+                num_questions=num_questions,
+                language=language,
+                custom_description=custom_description,
+                options_per_question=options_per_question,
+                correct_answers_per_question=correct_answers_per_question
+            )
+
+            # Generate quiz (does NOT save to database)
+            result = generator.generate_quiz(subject)
 
             logger.info(
-                f"AI Quiz {quiz.id} with {num_questions} questions in {language} "
-                f"generated for user {request.user.id}"
+                f"AI Quiz generated (not saved) with {num_questions} questions in {language} "
+                f"({options_per_question} options, {correct_answers_per_question} correct) "
+                f"for user {request.user.id}"
             )
 
             return Response(
@@ -131,9 +171,16 @@ class GenerateAIQuizView(generics.CreateAPIView):
                     "message": f"Quiz generated successfully with {num_questions} questions in {language}",
                     "num_questions": num_questions,
                     "language": language,
-                    "quiz": quiz_serializer.data
+                    "options_per_question": options_per_question,
+                    "correct_answers_per_question": correct_answers_per_question,
+                    "quiz_data": result["quiz_data"],
+                    "subject": {
+                        "id": str(result["subject"].id),
+                        "name": result["subject"].name,
+                        "description": result["subject"].description
+                    }
                 },
-                status=status.HTTP_201_CREATED
+                status=status.HTTP_200_OK
             )
 
         except Subject.DoesNotExist:
@@ -156,15 +203,121 @@ class GenerateAIQuizView(generics.CreateAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-class QuizDetailView(generics.RetrieveAPIView):
-    """
-    API endpoint to retrieve a specific quiz
 
-    GET /api/learning/quiz/{quiz_id}/
+class SaveGeneratedQuizView(generics.CreateAPIView):
+    """
+    API endpoint to save a generated quiz to database
+
+    Receives the quiz data from GenerateAIQuizView and saves it
+
+    POST /api/learning/quiz/save-generated/
+    Request Body:
+    {
+        "subject_id": "uuid",
+        "quiz_data": {
+            "title": "...",
+            "description": "...",
+            "questions": [...]
+        },
+        "num_questions": 15,
+        "language": "English",
+        "options_per_question": 2,
+        "correct_answers_per_question": 1
+    }
+
+    Response:
+    {
+        "success": true,
+        "message": "Quiz saved successfully",
+        "quiz": {
+            "id": "...",
+            "title": "...",
+            ... (full quiz data with questions and options)
+        }
+    }
     """
     permission_classes = [IsAuthenticated]
-    queryset = Quiz.objects.prefetch_related('questions__answer_options')
-    serializer_class = QuizSerializer
+    serializer_class = SaveGeneratedQuizSerializer
+
+    def create(self, request, *args, **kwargs):
+        """Save generated quiz to database"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            subject_id = serializer.validated_data.get('subject_id')
+            quiz_data = serializer.validated_data.get('quiz_data')
+            num_questions = serializer.validated_data.get('num_questions')
+            language = serializer.validated_data.get('language')
+            options_per_question = serializer.validated_data.get('options_per_question')
+            correct_answers_per_question = serializer.validated_data.get('correct_answers_per_question')
+
+            # Get subject
+            subject = Subject.objects.get(id=subject_id)
+
+            # Initialize generator (needed for save_quiz_to_database method)
+            generator = AIQuizGenerator(
+                num_questions=num_questions,
+                language=language,
+                options_per_question=options_per_question,
+                correct_answers_per_question=correct_answers_per_question
+            )
+
+            # Save quiz to database
+            quiz = generator.save_quiz_to_database(
+                subject=subject,
+                quiz_data=quiz_data,
+                created_by=request.user,
+                num_questions=num_questions,
+                language=language,
+                options_per_question=options_per_question,
+                correct_answers_per_question=correct_answers_per_question
+            )
+
+            # Serialize the saved quiz
+            quiz_serializer = QuizSerializer(quiz)
+
+            logger.info(
+                f"AI Quiz {quiz.id} saved to database with {num_questions} questions in {language} "
+                f"({options_per_question} options, {correct_answers_per_question} correct) "
+                f"by user {request.user.id}"
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "message": f"Quiz saved successfully with {num_questions} questions",
+                    "quiz": quiz_serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+
+        except Subject.DoesNotExist:
+            return Response(
+                {"success": False, "error": "Subject not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error in SaveGeneratedQuizView: {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "error": str(e) if settings.DEBUG else "Failed to save quiz"
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class QuizDetailView(generics.RetrieveAPIView):
+    """
+    API endpoint to retrieve a specific quiz in preview mode
+
+    GET /api/learning/quiz/{quiz_id}/
+
+    Returns 1/3 random questions without answers (preview mode)
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = Quiz.objects.prefetch_related('questions')
+    serializer_class = QuizDetailPreviewSerializer
     lookup_field = 'id'
     lookup_url_kwarg = 'quiz_id'
 
@@ -173,6 +326,7 @@ class QuizDetailView(generics.RetrieveAPIView):
             instance = self.get_object()
             serializer = self.get_serializer(instance)
             return Response(serializer.data, status=status.HTTP_200_OK)
+
         except Quiz.DoesNotExist:
             return Response(
                 {"success": False, "error": "Quiz not found"},
@@ -185,51 +339,168 @@ class QuizDetailView(generics.RetrieveAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
-class QuizListView(generics.ListAPIView):
+class RandomQuizzesView(APIView):
     """
-    API endpoint to list all quizzes
+    GET /api/learning/quiz/random/
+    Get random public quizzes for the authenticated user (excluding their own quizzes)
+    """
+    permission_classes = [IsAuthenticated]
 
-    GET /api/learning/quiz/
-    Query params:
-    - quiz_type: 'ai' or 'human' (optional)
-    - subject_id: filter by subject (optional)
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get("limit", 10))
+            limit = min(max(limit, 1), 50)  # constrain 1–50
+
+            quizzes = get_random_quizzes_for_user(request.user.id, limit=limit)
+
+            serializer = QuizListSerializer(
+                quizzes, many=True, context={"request": request}
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "count": len(serializer.data),
+                    "quizzes": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching random quizzes: {str(e)}")
+            return Response(
+                {"success": False, "error": "Failed to fetch random quizzes"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class RandomQuizzesSubjectView(APIView):
+    """
+    GET /api/learning/quiz/random/subject/<subject_id>/
+    Get random public quizzes by subject for the authenticated user
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, subject_id):
+        try:
+            limit = int(request.query_params.get("limit", 10))
+            limit = min(max(limit, 1), 50)  # constrain 1–50
+
+            quizzes = get_random_quizzes_by_subject(
+                subject_id, request.user.id, limit=limit
+            )
+
+            serializer = QuizListSerializer(
+                quizzes, many=True, context={"request": request}
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "count": len(serializer.data),
+                    "quizzes": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching random quizzes by subject: {str(e)}")
+            return Response(
+                {"success": False, "error": "Failed to fetch random quizzes"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class QuizSearchPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class SearchQuizzesView(generics.ListAPIView):
+    """
+    API endpoint to search and filter quizzes
+
+    GET /api/learning/quiz/search/
+
+    Query Parameters:
+    - q: Search term (searches in title and description) (optional)
+    - subject_id: Filter by subject (optional)
+    - quiz_type: Filter by type 'ai' or 'human' (optional)
+    - language: Filter by language (optional)
+    - ordering: Sort by 'created_at', 'title' (optional, default: '-created_at')
+    - page: Page number (default: 1)
+    - page_size: Items per page (default: 10, max: 100)
     """
     permission_classes = [IsAuthenticated]
     serializer_class = QuizListSerializer
+    pagination_class = QuizSearchPagination
 
     def get_queryset(self):
-        queryset = Quiz.objects.prefetch_related('questions__answer_options').order_by('-created_at')
+        queryset = Quiz.objects.prefetch_related('questions').order_by('-created_at')
 
-        # Filter by quiz type if provided
+        # Search by title or description (optional)
+        search_query = self.request.query_params.get('q', '').strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(title__icontains=search_query) |
+                Q(description__icontains=search_query)
+            )
+
+        # Filter by subject
+        subject_id = self.request.query_params.get('subject_id')
+        if subject_id:
+            queryset = queryset.filter(subject_id=subject_id)
+
+        # Filter by quiz type
         quiz_type = self.request.query_params.get('quiz_type')
         if quiz_type in ['ai', 'human']:
             queryset = queryset.filter(quiz_type=quiz_type)
 
-        # Filter by subject if provided
-        subject_id = self.request.query_params.get('subject_id')
-        if subject_id:
-            queryset = queryset.filter(subject_id=subject_id)
+        # Filter by language
+        language = self.request.query_params.get('language')
+        if language:
+            # Exact match for language
+            queryset = queryset.filter(language=language)
+
+        # Ordering
+        ordering = self.request.query_params.get('ordering', '-created_at')
+        allowed_ordering = ['-created_at', 'created_at', 'title', '-title']
+        if ordering in allowed_ordering:
+            queryset = queryset.order_by(ordering)
 
         return queryset
 
     def list(self, request, *args, **kwargs):
         try:
             queryset = self.filter_queryset(self.get_queryset())
-            serializer = self.get_serializer(queryset, many=True)
+            search_query = request.query_params.get('q', '').strip()
 
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response({
+                    "success": True,
+                    "search_query": search_query if search_query else None,
+                    "count": len(serializer.data),
+                    "results": serializer.data
+                })
+
+            serializer = self.get_serializer(queryset, many=True)
             return Response(
                 {
                     "success": True,
+                    "search_query": search_query if search_query else None,
                     "count": len(serializer.data),
-                    "quizzes": serializer.data
+                    "results": serializer.data
                 },
                 status=status.HTTP_200_OK
             )
+
         except Exception as e:
-            logger.error(f"Error in QuizListView: {str(e)}")
+            logger.error(f"Error in SearchQuizzesView: {str(e)}")
             return Response(
-                {"success": False, "error": "Failed to retrieve quizzes"},
+                {"success": False, "error": "Failed to search quizzes"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -678,78 +949,6 @@ class ImportQuestionsFromExcelView(generics.CreateAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-# =====================QUIZ EDIT & DELETE(WITH OWNERSHIP) ===================
-
-class EditQuizView(QuizOwnershipMixin, generics.UpdateAPIView):
-    """
-    API endpoint to edit quiz information
-    Only the quiz owner (creator) can edit it
-
-    PATCH /api/learning/quiz/{quiz_id}/edit/
-    {
-        "title": "Updated Title",
-        "description": "Updated Description",
-        "subject": "uuid-of-subject",
-        "language": "Vietnamese"
-    }
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class = EditQuizSerializer
-    queryset = Quiz.objects.all()
-    lookup_field = 'id'
-    lookup_url_kwarg = 'quiz_id'
-
-    def partial_update(self, request, *args, **kwargs):
-        try:
-            instance = self.get_object()
-
-            # Check ownership
-            permission_error = self.check_permission_or_403(instance, request)
-            if permission_error:
-                return permission_error
-
-            serializer = self.get_serializer(instance, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-
-            logger.info(f"Quiz {instance.id} updated by owner {request.user.id}")
-
-            return Response(
-                {
-                    "success": True,
-                    "message": "Quiz updated successfully",
-                    "quiz": {
-                        "id": str(instance.id),
-                        "title": instance.title,
-                        "description": instance.description,
-                        "subject": str(instance.subject.id),
-                        "language": instance.language
-                    }
-                },
-                status=status.HTTP_200_OK
-            )
-        except Quiz.DoesNotExist:
-            return Response(
-                {
-                    "success": False,
-                    "error": "Quiz not found"
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            logger.error(f"Error in EditQuizView: {str(e)}")
-            return Response(
-                {
-                    "success": False,
-                    "error": str(e)
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    def update(self, request, *args, **kwargs):
-        return self.partial_update(request, *args, **kwargs)
-
-
 class DeleteQuizView(QuizOwnershipMixin, generics.DestroyAPIView):
     """
     API endpoint to delete a quiz
@@ -808,358 +1007,99 @@ class DeleteQuizView(QuizOwnershipMixin, generics.DestroyAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
-# ===================== QUESTION EDIT & DELETE (WITH OWNERSHIP) =====================
-
-class EditQuestionView(QuizOwnershipMixin, generics.UpdateAPIView):
+class EditQuizView(generics.UpdateAPIView):
     """
-    API endpoint to edit a quiz question and its answer options
-    Only the quiz owner can edit questions
+    Unified API endpoint to edit quiz, questions, and answer options in ONE request
 
-    PATCH /api/learning/quiz/{quiz_id}/question/{question_id}/edit/
+    PATCH/PUT /api/learning/quiz/{quiz_id}/edit-unified/
+
+    This endpoint allows you to:
+    1. Edit quiz metadata (title, description, subject, language)
+    2. Add new questions
+    3. Update existing questions
+    4. Delete questions
+    5. Add new answer options
+    6. Update existing answer options
+    7. Delete answer options
+
+    All in a single API call!
+
+    Request Body Structure:
     {
-        "question_text": "Updated question text?",
-        "answer_options": [
+        "title": "Updated Quiz Title",  // optional
+        "description": "Updated description",  // optional
+        "subject_id": "uuid",  // optional
+        "language": "Vietnamese",  // optional
+        "questions": [  // optional
             {
-                "option_text": "Answer 1",
-                "is_correct": true
-            },
-            {
-                "option_text": "Answer 2",
-                "is_correct": false
+                "id": "existing-question-uuid",  // required for update/delete, null for create
+                "_action": "update",  // "create", "update", "delete", "keep"
+                "question_text": "Updated question?",
+                "answer_options": [
+                    {
+                        "id": "existing-option-uuid",  // required for update/delete, null for create
+                        "_action": "update",  // "create", "update", "delete", "keep"
+                        "option_text": "Updated option",
+                        "is_correct": true
+                    }
+                ]
             }
         ]
     }
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class = EditQuestionSerializer
-    queryset = QuizQuestion.objects.all()
-    lookup_field = 'id'
-    lookup_url_kwarg = 'question_id'
 
-    def get_queryset(self):
-        """Filter questions by quiz_id"""
-        quiz_id = self.kwargs.get('quiz_id')
-        return QuizQuestion.objects.filter(quiz_id=quiz_id)
-
-    def partial_update(self, request, *args, **kwargs):
-        try:
-            # Check quiz ownership first
-            quiz = self.get_quiz_owner()
-            permission_error = self.check_permission_or_403(quiz, request)
-            if permission_error:
-                return permission_error
-
-            instance = self.get_object()
-            serializer = self.get_serializer(instance, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-
-            logger.info(f"Question {instance.id} updated by quiz owner {request.user.id}")
-
-            # Get updated answer options
-            answer_options = [
-                {
-                    "id": str(option.id),
-                    "option_text": option.option_text,
-                    "is_correct": option.is_correct
-                }
-                for option in instance.answer_options.all()
-            ]
-
-            return Response(
-                {
-                    "success": True,
-                    "message": "Question updated successfully",
-                    "question": {
-                        "id": str(instance.id),
-                        "question_text": instance.question_text,
-                        "answer_options": answer_options
-                    }
-                },
-                status=status.HTTP_200_OK
-            )
-        except QuizQuestion.DoesNotExist:
-            return Response(
-                {
-                    "success": False,
-                    "error": "Question not found"
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            logger.error(f"Error in EditQuestionView: {str(e)}")
-            return Response(
-                {
-                    "success": False,
-                    "error": str(e)
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    def update(self, request, *args, **kwargs):
-        return self.partial_update(request, *args, **kwargs)
-
-
-class DeleteQuestionView(QuizOwnershipMixin, generics.DestroyAPIView):
-    """
-    API endpoint to delete a quiz question
-    Only the quiz owner can delete questions
-
-    DELETE /api/learning/quiz/{quiz_id}/question/{question_id}/delete/
-
-    This will delete:
-    - The question itself
-    - All answer options for this question
-    """
-    permission_classes = [IsAuthenticated]
-    queryset = QuizQuestion.objects.all()
-    lookup_field = 'id'
-    lookup_url_kwarg = 'question_id'
-
-    def get_queryset(self):
-        """Filter questions by quiz_id"""
-        quiz_id = self.kwargs.get('quiz_id')
-        return QuizQuestion.objects.filter(quiz_id=quiz_id)
-
-    def destroy(self, request, *args, **kwargs):
-        try:
-            # Check quiz ownership first
-            quiz = self.get_quiz_owner()
-            permission_error = self.check_permission_or_403(quiz, request)
-            if permission_error:
-                return permission_error
-
-            instance = self.get_object()
-            question_text = instance.question_text[:50]
-
-            instance.delete()
-
-            logger.info(f"Question {instance.id} deleted by quiz owner {request.user.id}")
-
-            return Response(
-                {
-                    "success": True,
-                    "message": f"Question '{question_text}...' and all its answer options have been deleted successfully"
-                },
-                status=status.HTTP_200_OK
-            )
-        except QuizQuestion.DoesNotExist:
-            return Response(
-                {
-                    "success": False,
-                    "error": "Question not found"
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            logger.error(f"Error in DeleteQuestionView: {str(e)}")
-            return Response(
-                {
-                    "success": False,
-                    "error": "Failed to delete question"
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-# ===================== ANSWER OPTION EDIT & DELETE (WITH OWNERSHIP) =====================
-
-class EditAnswerOptionView(QuizOwnershipMixin, generics.UpdateAPIView):
-    """
-    API endpoint to edit a single answer option
-    Only the quiz owner can edit answer options
-
-    PATCH /api/learning/quiz/{quiz_id}/question/{question_id}/option/{option_id}/edit/
+    Response:
     {
-        "option_text": "Updated answer text",
-        "is_correct": true
+        "success": true,
+        "message": "Quiz updated successfully",
+        "quiz": { ... full quiz data with questions and options ... }
     }
     """
     permission_classes = [IsAuthenticated]
-    serializer_class = UpdateAnswerOptionSerializer
-    queryset = QuizAnswerOption.objects.all()
+    serializer_class = UnifiedEditQuizSerializer
+    queryset = Quiz.objects.all()
     lookup_field = 'id'
-    lookup_url_kwarg = 'option_id'
 
-    def get_queryset(self):
-        """Filter options by question_id"""
-        question_id = self.kwargs.get('question_id')
-        return QuizAnswerOption.objects.filter(question_id=question_id)
+    def update(self, request, *args, **kwargs):
+        """Handle unified quiz edit"""
+        quiz = self.get_object()
 
-    def partial_update(self, request, *args, **kwargs):
+        # Check if user owns the quiz (optional - adjust based on your permissions)
+        # if quiz.created_by != request.user:
+        #     return Response(
+        #         {"success": False, "error": "You don't have permission to edit this quiz"},
+        #         status=status.HTTP_403_FORBIDDEN
+        #     )
+
+        serializer = self.get_serializer(quiz, data=request.data, partial=True)
+
         try:
-            # Check quiz ownership first
-            quiz = self.get_quiz_owner()
-            permission_error = self.check_permission_or_403(quiz, request)
-            if permission_error:
-                return permission_error
-
-            instance = self.get_object()
-
-            # Validate that if we're updating is_correct to False,
-            # at least one other option remains correct
-            if 'is_correct' in request.data and request.data['is_correct'] is False:
-                other_correct = instance.question.answer_options.filter(
-                    is_correct=True
-                ).exclude(id=instance.id).exists()
-
-                if not other_correct:
-                    return Response(
-                        {
-                            "success": False,
-                            "error": "Cannot unmark as correct - question must have at least one correct answer"
-                        },
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-            # Check for duplicate option text if updating option_text
-            if 'option_text' in request.data:
-                new_text = request.data['option_text'].strip()
-                duplicate = instance.question.answer_options.filter(
-                    option_text=new_text
-                ).exclude(id=instance.id).exists()
-
-                if duplicate:
-                    return Response(
-                        {
-                            "success": False,
-                            "error": "An answer option with this text already exists for this question"
-                        },
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-            serializer = self.get_serializer(instance, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
+            updated_quiz = serializer.save()
 
-            # Manual update since we need to handle stripped text
-            if 'option_text' in request.data:
-                instance.option_text = request.data['option_text'].strip()
-            if 'is_correct' in request.data:
-                instance.is_correct = request.data['is_correct']
+            # Return the updated quiz with all questions and options
+            quiz_serializer = QuizSerializer(updated_quiz)
 
-            instance.save()
-
-            logger.info(f"Answer option {instance.id} updated by quiz owner {request.user.id}")
+            logger.info(f"Quiz {quiz.id} updated successfully by user {request.user.id}")
 
             return Response(
                 {
                     "success": True,
-                    "message": "Answer option updated successfully",
-                    "option": {
-                        "id": str(instance.id),
-                        "option_text": instance.option_text,
-                        "is_correct": instance.is_correct
-                    }
+                    "message": "Quiz updated successfully",
+                    "quiz": quiz_serializer.data
                 },
                 status=status.HTTP_200_OK
             )
-        except QuizAnswerOption.DoesNotExist:
-            return Response(
-                {
-                    "success": False,
-                    "error": "Answer option not found"
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
+
         except Exception as e:
-            logger.error(f"Error in EditAnswerOptionView: {str(e)}")
+            logger.error(f"Error updating quiz {quiz.id}: {str(e)}")
             return Response(
                 {
                     "success": False,
-                    "error": str(e)
+                    "error": str(e) if settings.DEBUG else "Failed to update quiz"
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-    def update(self, request, *args, **kwargs):
-        return self.partial_update(request, *args, **kwargs)
-
-
-class DeleteAnswerOptionView(QuizOwnershipMixin, generics.DestroyAPIView):
-    """
-    API endpoint to delete a single answer option
-    Only the quiz owner can delete answer options
-
-    DELETE /api/learning/quiz/{quiz_id}/question/{question_id}/option/{option_id}/delete/
-
-    Validation:
-    - Cannot delete if it's the only correct answer
-    - Question must have at least 2 options after deletion
-    """
-    permission_classes = [IsAuthenticated]
-    queryset = QuizAnswerOption.objects.all()
-    lookup_field = 'id'
-    lookup_url_kwarg = 'option_id'
-
-    def get_queryset(self):
-        """Filter options by question_id"""
-        question_id = self.kwargs.get('question_id')
-        return QuizAnswerOption.objects.filter(question_id=question_id)
-
-    def destroy(self, request, *args, **kwargs):
-        try:
-            # Check quiz ownership first
-            quiz = self.get_quiz_owner()
-            permission_error = self.check_permission_or_403(quiz, request)
-            if permission_error:
-                return permission_error
-
-            instance = self.get_object()
-            question = instance.question
-            option_text = instance.option_text[:50]
-
-            # Check if question would have less than 2 options after deletion
-            remaining_options = question.answer_options.exclude(id=instance.id).count()
-            if remaining_options < 2:
-                return Response(
-                    {
-                        "success": False,
-                        "error": "Cannot delete - question must have at least 2 answer options"
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Check if this is the only correct answer
-            if instance.is_correct:
-                other_correct = question.answer_options.filter(
-                    is_correct=True
-                ).exclude(id=instance.id).exists()
-
-                if not other_correct:
-                    return Response(
-                        {
-                            "success": False,
-                            "error": "Cannot delete - this is the only correct answer for this question"
-                        },
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-            instance.delete()
-
-            logger.info(f"Answer option {instance.id} deleted by quiz owner {request.user.id}")
-
-            return Response(
-                {
-                    "success": True,
-                    "message": f"Answer option '{option_text}...' has been deleted successfully"
-                },
-                status=status.HTTP_200_OK
-            )
-        except QuizAnswerOption.DoesNotExist:
-            return Response(
-                {
-                    "success": False,
-                    "error": "Answer option not found"
-                },
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            logger.error(f"Error in DeleteAnswerOptionView: {str(e)}")
-            return Response(
-                {
-                    "success": False,
-                    "error": "Failed to delete answer option"
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+    def partial_update(self, request, *args, **kwargs):
+        """Handle PATCH requests (same as PUT for this endpoint)"""
+        return self.update(request, *args, **kwargs)

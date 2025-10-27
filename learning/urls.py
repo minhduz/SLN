@@ -5,7 +5,11 @@ from . import views
 urlpatterns = [
     # Quiz generation and listing
     path('quiz/generate-ai/', views.GenerateAIQuizView.as_view(), name='generate-ai-quiz'),
-    path('quiz/', views.QuizListView.as_view(), name='quiz-list'),
+    path('quiz/save-generated/', views.SaveGeneratedQuizView.as_view(), name='save-generated-quiz'),
+
+    path('quiz/random/', views.RandomQuizzesView.as_view(), name='random-quizzes'),
+    path('quiz/random/subject/<uuid:subject_id>/', views.RandomQuizzesSubjectView.as_view(), name='random-quizzes-subject'),
+    path('quiz/search/', views.SearchQuizzesView.as_view(), name='search-quizzes'),
 
     # Quiz detail and questions
     path('quiz/<uuid:quiz_id>/', views.QuizDetailView.as_view(), name='quiz-detail'),
@@ -26,15 +30,4 @@ urlpatterns = [
     # ======================== QUIZ EDIT & DELETE ========================
     path('quiz/<uuid:quiz_id>/edit/', views.EditQuizView.as_view(), name='edit-quiz'),
     path('quiz/<uuid:quiz_id>/delete/', views.DeleteQuizView.as_view(), name='delete-quiz'),
-
-    # ======================== QUESTION EDIT & DELETE ========================
-    path('quiz/<uuid:quiz_id>/question/<uuid:question_id>/edit/', views.EditQuestionView.as_view(), name='edit-question'),
-    path('quiz/<uuid:quiz_id>/question/<uuid:question_id>/delete/', views.DeleteQuestionView.as_view(),
-         name='delete-question'),
-
-    # ======================== ANSWER OPTION EDIT & DELETE ========================
-    path('quiz/<uuid:quiz_id>/question/<uuid:question_id>/option/<uuid:option_id>/edit/',
-         views.EditAnswerOptionView.as_view(), name='edit-answer-option'),
-    path('quiz/<uuid:quiz_id>/question/<uuid:question_id>/option/<uuid:option_id>/delete/',
-         views.DeleteAnswerOptionView.as_view(), name='delete-answer-option'),
 ]

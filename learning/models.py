@@ -11,12 +11,28 @@ class Quiz(models.Model):
         ('ai', 'AI Generated'),
     ]
 
+    LANGUAGE_CHOICES = [
+        ('English', 'English'),
+        ('Simplified Chinese', 'Simplified Chinese'),
+        ('Traditional Chinese', 'Traditional Chinese'),
+        ('Japanese', 'Japanese'),
+        ('Korean', 'Korean'),
+        ('Indonesian', 'Indonesian'),
+        ('Thai', 'Thai'),
+        ('Vietnamese', 'Vietnamese'),
+        ('German', 'German'),
+        ('French', 'French'),
+        ('Spanish', 'Spanish'),
+        ('Portuguese', 'Portuguese'),
+        ('Russian', 'Russian'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=100)
     description = models.TextField(blank=True)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='quizzes')
     quiz_type = models.CharField(max_length=10, choices=QUIZ_TYPE_CHOICES, default='human')
-    language = models.CharField(max_length=50, default='English')
+    language = models.CharField(max_length=50, choices=LANGUAGE_CHOICES, default='English')
 
     # NEW: Track who created this quiz
     created_by = models.ForeignKey(
