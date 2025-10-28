@@ -321,8 +321,8 @@ class AnswerOptionInputSerializer(serializers.Serializer):
         return value.strip()
 
 
-class AddManualQuestionSerializer(serializers.Serializer):
-    """Serializer for adding a single question manually"""
+class ManualQuestionInputSerializer(serializers.Serializer):
+    """Serializer for a single question input"""
     question_text = serializers.CharField(max_length=1000)
     answer_options = AnswerOptionInputSerializer(many=True)
 
@@ -339,13 +339,35 @@ class AddManualQuestionSerializer(serializers.Serializer):
             raise serializers.ValidationError("Maximum 10 answer options allowed")
 
         # Check if at least one option is correct
-        if not any(option['is_correct'] for option in value):
+        correct_count = sum(1 for option in value if option['is_correct'])
+        if correct_count < 1:
             raise serializers.ValidationError("At least one option must be marked as correct")
+
+        # Check correct answers ratio (must be ≤ 50% of total)
+        max_correct = len(value) // 2
+        if correct_count > max_correct:
+            raise serializers.ValidationError(
+                f"Too many correct answers. Maximum {max_correct} correct answers allowed for {len(value)} total options (must be ≤ 50%)"
+            )
 
         # Check for duplicate options
         option_texts = [opt['option_text'] for opt in value]
         if len(option_texts) != len(set(option_texts)):
             raise serializers.ValidationError("Duplicate answer options are not allowed")
+
+        return value
+
+
+class AddManualQuestionsSerializer(serializers.Serializer):
+    """Serializer for adding multiple questions at once"""
+    questions = ManualQuestionInputSerializer(many=True)
+
+    def validate_questions(self, value):
+        if not value or len(value) == 0:
+            raise serializers.ValidationError("At least one question is required")
+
+        if len(value) > 50:
+            raise serializers.ValidationError("Maximum 50 questions allowed per request")
 
         return value
 

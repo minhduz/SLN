@@ -4,6 +4,7 @@ from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import ValidationError
 from django.conf import settings
 import logging
 from django.db import transaction
@@ -22,7 +23,7 @@ from .serializers import (
     QuizAttemptDetailSerializer,
     UserQuizAttemptsSerializer,
     CreateQuizSerializer,
-    AddManualQuestionSerializer,
+    AddManualQuestionsSerializer,
     ImportQuestionsFromExcelSerializer,
     QuizDetailPreviewSerializer,
     UnifiedEditQuizSerializer
@@ -762,81 +763,138 @@ class CreateQuizView(generics.CreateAPIView):
             )
 
 
-class AddManualQuestionView(generics.CreateAPIView):
+class AddManualQuestionsView(generics.CreateAPIView):
     """
-    API endpoint to add a question manually to a quiz (for manual creation)
+    API endpoint to add multiple questions manually to a quiz at once
 
-    POST /api/learning/quiz/{quiz_id}/add-manual-question/
+    POST /api/learning/quiz/{quiz_id}/add-manual-questions/
     {
-        "question_text": "What is the capital of France?",
-        "answer_options": [
+        "questions": [
             {
-                "option_text": "Paris",
-                "is_correct": true
+                "question_text": "What is the capital of France?",
+                "answer_options": [
+                    {
+                        "option_text": "Paris",
+                        "is_correct": true
+                    },
+                    {
+                        "option_text": "London",
+                        "is_correct": false
+                    },
+                    {
+                        "option_text": "Berlin",
+                        "is_correct": false
+                    }
+                ]
             },
             {
-                "option_text": "London",
-                "is_correct": false
-            },
-            {
-                "option_text": "Berlin",
-                "is_correct": false
+                "question_text": "What is 2+2?",
+                "answer_options": [
+                    {
+                        "option_text": "4",
+                        "is_correct": true
+                    },
+                    {
+                        "option_text": "3",
+                        "is_correct": false
+                    },
+                    {
+                        "option_text": "5",
+                        "is_correct": false
+                    }
+                ]
             }
         ]
     }
 
-    Can be called multiple times to add multiple questions to same quiz
+    Returns:
+    {
+        "success": true,
+        "message": "2 questions added successfully",
+        "questions_added": 2,
+        "questions": [
+            {
+                "id": "uuid",
+                "question_text": "What is the capital of France?",
+                "answer_options_count": 3
+            },
+            {
+                "id": "uuid",
+                "question_text": "What is 2+2?",
+                "answer_options_count": 3
+            }
+        ]
+    }
     """
     permission_classes = [IsAuthenticated]
-    serializer_class = AddManualQuestionSerializer
+    serializer_class = AddManualQuestionsSerializer
 
     def create(self, request, *args, **kwargs):
         try:
             quiz_id = self.kwargs.get('quiz_id')
             quiz = get_object_or_404(Quiz, id=quiz_id)
 
+            # Check if quiz belongs to user or user has permission
+            if quiz.created_by != request.user:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "You don't have permission to add questions to this quiz"
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
             # Validate input
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
 
-            question_text = serializer.validated_data['question_text']
-            answer_options_data = serializer.validated_data['answer_options']
+            questions_data = serializer.validated_data['questions']
+            created_questions = []
 
-            # Create question and answer options in a transaction
+            # Create all questions and answer options in a single transaction
             with transaction.atomic():
-                # Create question
-                question = QuizQuestion.objects.create(
-                    quiz=quiz,
-                    question_text=question_text
-                )
+                for question_data in questions_data:
+                    question_text = question_data['question_text']
+                    answer_options_data = question_data['answer_options']
 
-                # Create answer options
-                for option_data in answer_options_data:
-                    QuizAnswerOption.objects.create(
-                        question=question,
-                        option_text=option_data['option_text'],
-                        is_correct=option_data['is_correct']
+                    # Create question
+                    question = QuizQuestion.objects.create(
+                        quiz=quiz,
+                        question_text=question_text
                     )
 
+                    # Create answer options
+                    answer_options = []
+                    for option_data in answer_options_data:
+                        answer_option = QuizAnswerOption.objects.create(
+                            question=question,
+                            option_text=option_data['option_text'],
+                            is_correct=option_data['is_correct']
+                        )
+                        answer_options.append(answer_option)
+
+                    created_questions.append({
+                        "id": str(question.id),
+                        "question_text": question.question_text,
+                        "answer_options_count": len(answer_options)
+                    })
+
             logger.info(
-                f"Question {question.id} added to quiz {quiz.id} by user {request.user.id}"
+                f"{len(created_questions)} questions added to quiz {quiz.id} by user {request.user.id}"
             )
 
             return Response(
                 {
                     "success": True,
-                    "message": "Question added successfully",
-                    "question": {
-                        "id": str(question.id),
-                        "question_text": question.question_text,
-                        "answer_options_count": len(answer_options_data)
-                    }
+                    "message": f"{len(created_questions)} question{'s' if len(created_questions) != 1 else ''} added successfully",
+                    "questions_added": len(created_questions),
+                    "questions": created_questions
                 },
                 status=status.HTTP_201_CREATED
             )
 
-        except Exception as e:
-            logger.error(f"Error in AddManualQuestionView: {str(e)}")
+        except ValidationError as e:
+            logger.warning(f"Validation error in AddManualQuestionsView: {str(e)}")
             return Response(
                 {
                     "success": False,
@@ -844,13 +902,22 @@ class AddManualQuestionView(generics.CreateAPIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
+        except Exception as e:
+            logger.error(f"Error in AddManualQuestionsView: {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "error": "An unexpected error occurred while adding questions"
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class ImportQuestionsFromExcelView(generics.CreateAPIView):
     """
-    API endpoint to import questions from Excel file to a quiz
+    API endpoint to parse questions from Excel file (does NOT save to database, does NOT require quiz_id)
 
-    POST /api/learning/quiz/{quiz_id}/import-questions-from-excel/
+    POST /api/learning/import-questions-from-excel/
 
     Form data:
     - file: Excel file (.xlsx or .xls)
@@ -861,6 +928,33 @@ class ImportQuestionsFromExcelView(generics.CreateAPIView):
     | What is 2+2? | 4 | true |
     | What is 2+2? | 5 | false |
     | What is 2+2? | 3 | false |
+
+    Returns:
+    {
+        "success": true,
+        "message": "Questions parsed successfully from Excel",
+        "questions_count": 2,
+        "total_options": 7,
+        "questions": [
+            {
+                "question_text": "What is 2+2?",
+                "answer_options": [
+                    {
+                        "option_text": "4",
+                        "is_correct": true
+                    },
+                    {
+                        "option_text": "5",
+                        "is_correct": false
+                    },
+                    {
+                        "option_text": "3",
+                        "is_correct": false
+                    }
+                ]
+            }
+        ]
+    }
     """
     permission_classes = [IsAuthenticated]
     serializer_class = ImportQuestionsFromExcelSerializer
@@ -871,13 +965,21 @@ class ImportQuestionsFromExcelView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         try:
-            quiz_id = self.kwargs.get('quiz_id')
-            quiz = get_object_or_404(Quiz, id=quiz_id)
-
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
 
             excel_file = serializer.validated_data['file']
+
+            # Validate file extension
+            file_name = excel_file.name.lower()
+            if not (file_name.endswith('.xlsx') or file_name.endswith('.xls')):
+                return Response(
+                    {
+                        "success": False,
+                        "error": "Invalid file format. Only .xlsx and .xls files are supported"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             # Save uploaded file to temporary location
             with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
@@ -890,39 +992,24 @@ class ImportQuestionsFromExcelView(generics.CreateAPIView):
                 excel_importer = ExcelQuizImporter(tmp_file_path)
                 quiz_data = excel_importer.parse_quiz_data()
 
-                # Create questions and answer options in a transaction
-                with transaction.atomic():
-                    total_options = 0
-                    for question_data in quiz_data:
-                        question = QuizQuestion.objects.create(
-                            quiz=quiz,
-                            question_text=question_data['question_text']
-                        )
-
-                        for option_data in question_data['answer_options']:
-                            QuizAnswerOption.objects.create(
-                                question=question,
-                                option_text=option_data['option_text'],
-                                is_correct=option_data['is_correct']
-                            )
-                            total_options += 1
+                # Count total options
+                total_options = sum(len(q['answer_options']) for q in quiz_data)
 
                 logger.info(
-                    f"Quiz {quiz.id} imported from Excel by user {request.user.id}: "
+                    f"Excel parsed by user {request.user.id}: "
                     f"{len(quiz_data)} questions, {total_options} options"
                 )
 
+                # Return parsed questions WITHOUT saving to database
                 return Response(
                     {
                         "success": True,
-                        "message": f"Questions imported successfully from Excel",
-                        "import_summary": {
-                            "quiz_id": str(quiz.id),
-                            "questions_added": len(quiz_data),
-                            "total_options_added": total_options
-                        }
+                        "message": f"Questions parsed successfully from Excel",
+                        "questions_count": len(quiz_data),
+                        "total_options": total_options,
+                        "questions": quiz_data  # Return the parsed questions
                     },
-                    status=status.HTTP_201_CREATED
+                    status=status.HTTP_200_OK
                 )
 
             finally:
@@ -944,7 +1031,7 @@ class ImportQuestionsFromExcelView(generics.CreateAPIView):
             return Response(
                 {
                     "success": False,
-                    "error": "Failed to import questions from Excel"
+                    "error": "Failed to parse questions from Excel"
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

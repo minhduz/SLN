@@ -24,8 +24,8 @@ urlpatterns = [
 
 
     path('quiz/create/', views.CreateQuizView.as_view(), name='create-quiz'),
-    path('quiz/<uuid:quiz_id>/add-manual-question/', views.AddManualQuestionView.as_view(), name='add-manual-question'),
-    path('quiz/<uuid:quiz_id>/import-questions-from-excel/', views.ImportQuestionsFromExcelView.as_view(), name='import-questions-excel'),
+    path('quiz/<uuid:quiz_id>/add-manual-questions/', views.AddManualQuestionsView.as_view(), name='add-manual-question'),
+    path('quiz/import-questions-from-excel/', views.ImportQuestionsFromExcelView.as_view(), name='import-questions-excel'),
 
     # ======================== QUIZ EDIT & DELETE ========================
     path('quiz/<uuid:quiz_id>/edit/', views.EditQuizView.as_view(), name='edit-quiz'),
