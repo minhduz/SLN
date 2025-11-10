@@ -4,12 +4,13 @@ from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from django.conf import settings
 import logging
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
+from .tasks import recalculate_quiz_rating
 
 from .models import Quiz, QuizQuestion, QuizAnswerOption, QuizAttempt, QuizAttemptAnswer
 from .serializers import (
@@ -26,7 +27,10 @@ from .serializers import (
     AddManualQuestionsSerializer,
     ImportQuestionsFromExcelSerializer,
     QuizDetailPreviewSerializer,
-    UnifiedEditQuizSerializer
+    UserQuizDetailSerializer,
+    UnifiedEditQuizSerializer,
+    QuizAttemptWithRatingSerializer,
+    RateQuizSerializer
 )
 from .service.quiz_service import AIQuizGenerator
 from .service.submit_service import QuizSubmitService
@@ -37,9 +41,7 @@ from qa.models import Subject
 import tempfile
 import os
 
-
 logger = logging.getLogger(__name__)
-
 
 # ===================== OWNERSHIP PERMISSION MIXIN =====================
 
@@ -87,7 +89,6 @@ class QuizOwnershipMixin:
                 status=status.HTTP_403_FORBIDDEN
             )
         return None
-
 
 class GenerateAIQuizView(generics.CreateAPIView):
     """
@@ -204,7 +205,6 @@ class GenerateAIQuizView(generics.CreateAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class SaveGeneratedQuizView(generics.CreateAPIView):
     """
     API endpoint to save a generated quiz to database
@@ -314,10 +314,14 @@ class QuizDetailView(generics.RetrieveAPIView):
 
     GET /api/learning/quiz/{quiz_id}/
 
-    Returns 1/3 random questions without answers (preview mode)
+    Returns:
+    - 1/3 random questions without answers (preview mode)
+    - Quiz rating and rating count
+    - User's attempt count and remaining attempts
+    - Total attempts count by all users
     """
     permission_classes = [IsAuthenticated]
-    queryset = Quiz.objects.prefetch_related('questions')
+    queryset = Quiz.objects.prefetch_related('questions', 'attempts')
     serializer_class = QuizDetailPreviewSerializer
     lookup_field = 'id'
     lookup_url_kwarg = 'quiz_id'
@@ -335,6 +339,58 @@ class QuizDetailView(generics.RetrieveAPIView):
             )
         except Exception as e:
             logger.error(f"Error in QuizDetailView: {str(e)}")
+            return Response(
+                {"success": False, "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class UserQuizDetailView(generics.RetrieveAPIView):
+    """
+    API endpoint to retrieve full quiz details with all questions and answers
+    Only accessible by the quiz creator
+
+    GET /api/learning/quiz/{quiz_id}/user-detail/
+
+    Returns:
+    - All questions with their answers (full access for owner)
+    - Quiz rating and rating count
+    - User's attempt count and remaining attempts
+    - Total attempts count by all users
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = Quiz.objects.prefetch_related('questions__answer_options', 'attempts')  # Added 'attempts'
+    serializer_class = UserQuizDetailSerializer
+    lookup_field = 'id'
+    lookup_url_kwarg = 'quiz_id'
+
+    def get_object(self):
+        """Override to ensure only the creator can access full details"""
+        obj = super().get_object()
+
+        # Check if the user is the creator
+        if obj.created_by != self.request.user:
+            raise PermissionDenied("You don't have permission to view full details of this quiz.")
+
+        return obj
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Quiz.DoesNotExist:
+            return Response(
+                {"success": False, "error": "Quiz not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except PermissionDenied as e:
+            return Response(
+                {"success": False, "error": str(e)},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        except Exception as e:
+            logger.error(f"Error in UserQuizDetailView: {str(e)}")
             return Response(
                 {"success": False, "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -374,7 +430,6 @@ class RandomQuizzesView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-
 class RandomQuizzesSubjectView(APIView):
     """
     GET /api/learning/quiz/random/subject/<subject_id>/
@@ -411,12 +466,90 @@ class RandomQuizzesSubjectView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+class UserQuizzesView(APIView):
+    """
+    GET /api/learning/quiz/my-quizzes/
+    Get all quizzes created by the authenticated user with optional filters
+
+    Query Parameters:
+    - limit: number of results (1-50, default: all)
+    - offset: pagination offset (default: 0)
+    - quiz_type: filter by quiz_type (ai/manual)
+    - subject: filter by subject_id
+    - language: filter by language
+    - title: search by quiz title (case-insensitive partial match)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Get query parameters
+            limit = request.query_params.get("limit")
+            offset = int(request.query_params.get("offset", 0))
+            quiz_type = request.query_params.get("quiz_type")
+            subject_id = request.query_params.get("subject")
+            language = request.query_params.get("language")
+            title = request.query_params.get("title")
+
+            # Base queryset - quizzes created by the user
+            quizzes = Quiz.objects.filter(
+                created_by=request.user
+            ).prefetch_related(
+                'questions__answer_options',
+                'subject',
+                'created_by'
+            )
+
+            # Apply filters
+            if quiz_type:
+                quizzes = quizzes.filter(quiz_type=quiz_type)
+
+            if subject_id:
+                quizzes = quizzes.filter(subject_id=subject_id)
+
+            if language:
+                quizzes = quizzes.filter(language=language)
+
+            if title:
+                quizzes = quizzes.filter(title__icontains=title)
+
+            # Order by most recent first
+            quizzes = quizzes.order_by('-created_at')
+
+            # Get total count before pagination
+            total_count = quizzes.count()
+
+            # Apply pagination if limit is provided
+            if limit:
+                limit = min(max(int(limit), 1), 50)  # constrain 1–50
+                quizzes = quizzes[offset:offset + limit]
+
+            serializer = QuizListSerializer(
+                quizzes, many=True, context={"request": request}
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "total_count": total_count,
+                    "count": len(serializer.data),
+                    "offset": offset,
+                    "quizzes": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching user quizzes: {str(e)}")
+            return Response(
+                {"success": False, "error": "Failed to fetch user quizzes"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 class QuizSearchPagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'page_size'
     max_page_size = 100
-
 
 class SearchQuizzesView(generics.ListAPIView):
     """
@@ -439,6 +572,9 @@ class SearchQuizzesView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = Quiz.objects.prefetch_related('questions').order_by('-created_at')
+
+        # ✅ Remove quizzes created by the authenticated user
+        queryset = queryset.exclude(created_by=self.request.user)
 
         # Search by title or description (optional)
         search_query = self.request.query_params.get('q', '').strip()
@@ -505,12 +641,14 @@ class SearchQuizzesView(generics.ListAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class QuizQuestionListView(generics.ListAPIView):
     """
     API endpoint to list questions for a specific quiz
 
     GET /api/learning/quiz/{quiz_id}/questions/
+
+    Returns questions with attempt tracking.
+    If max attempts reached (3), includes error message.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = QuizQuestionSerializer
@@ -519,31 +657,72 @@ class QuizQuestionListView(generics.ListAPIView):
         quiz_id = self.kwargs.get('quiz_id')
         return QuizQuestion.objects.filter(quiz_id=quiz_id).prefetch_related('answer_options')
 
+    def get_serializer_context(self):
+        """
+        Add attempt_number to serializer context
+        This allows QuizQuestionSerializer to access it via self.context
+        """
+        context = super().get_serializer_context()
+
+        # Get quiz and calculate attempt number
+        quiz_id = self.kwargs.get('quiz_id')
+        try:
+            quiz = Quiz.objects.get(id=quiz_id)
+            attempt_count = quiz.get_attempt_count(self.request.user)
+            # Current attempt number is count + 1 (e.g., if 2 attempts done, this is attempt 3)
+            context['attempt_number'] = attempt_count + 1
+        except Quiz.DoesNotExist:
+            context['attempt_number'] = None
+
+        return context
+
     def list(self, request, *args, **kwargs):
         try:
             quiz_id = self.kwargs.get('quiz_id')
             quiz = get_object_or_404(Quiz, id=quiz_id)
 
+            # Check attempt limit
+            attempt_count = quiz.get_attempt_count(request.user)
+            can_attempt = quiz.can_user_attempt(request.user)
+            remaining_attempts = quiz.get_user_remaining_attempts(request.user)
+            current_attempt_number = attempt_count + 1
+
+            # Get questions with attempt_number in context
             queryset = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset, many=True)
 
-            return Response(
-                {
-                    "success": True,
-                    "quiz_id": str(quiz.id),
-                    "quiz_title": quiz.title,
-                    "count": len(serializer.data),
-                    "questions": serializer.data
-                },
-                status=status.HTTP_200_OK
-            )
+            # Base response structure
+            response_data = {
+                "success": True,
+                "quiz_id": str(quiz.id),
+                "quiz_title": quiz.title,
+                "count": len(serializer.data),
+                "questions": serializer.data,
+                "attempt_number": current_attempt_number
+            }
+
+            # Add error if max attempts reached
+            if not can_attempt:
+                response_data[
+                    "error"] = f"Maximum attempts reached. You have already completed this quiz {attempt_count} times."
+                logger.warning(
+                    f"User {request.user.id} attempted to load quiz {quiz_id} "
+                    f"but has reached max attempts ({attempt_count}/3)"
+                )
+            else:
+                logger.info(
+                    f"User {request.user.id} loaded quiz {quiz_id}. "
+                    f"Attempt {current_attempt_number}/3, Remaining: {remaining_attempts - 1} after this"
+                )
+
+            return Response(response_data, status=status.HTTP_200_OK)
+
         except Exception as e:
             logger.error(f"Error in QuizQuestionListView: {str(e)}")
             return Response(
                 {"success": False, "error": "Failed to retrieve questions"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class SubmitQuizView(generics.CreateAPIView):
     """
@@ -612,11 +791,17 @@ class SubmitQuizView(generics.CreateAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
 class QuizAttemptDetailView(generics.RetrieveAPIView):
     """
     API endpoint to retrieve quiz attempt details with answers
 
     GET /api/learning/quiz/attempt/{attempt_id}/
+
+    Response includes:
+    - attempt details with score and duration
+    - rating (if already rated) and can_rate flag
+    - all answers with correct/incorrect status
     """
     permission_classes = [IsAuthenticated]
     queryset = QuizAttempt.objects.prefetch_related('answers__question', 'answers__selected_option')
@@ -655,7 +840,6 @@ class QuizAttemptDetailView(generics.RetrieveAPIView):
                 {"success": False, "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class UserQuizAttemptsView(generics.ListAPIView):
     """
@@ -697,7 +881,6 @@ class UserQuizAttemptsView(generics.ListAPIView):
                 {"success": False, "error": "Failed to retrieve attempts"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 # ===================== QUIZ CREATION (Used by both methods) =====================
 
@@ -761,7 +944,6 @@ class CreateQuizView(generics.CreateAPIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
-
 
 class AddManualQuestionsView(generics.CreateAPIView):
     """
@@ -911,7 +1093,6 @@ class AddManualQuestionsView(generics.CreateAPIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class ImportQuestionsFromExcelView(generics.CreateAPIView):
     """
@@ -1145,6 +1326,7 @@ class EditQuizView(generics.UpdateAPIView):
     serializer_class = UnifiedEditQuizSerializer
     queryset = Quiz.objects.all()
     lookup_field = 'id'
+    lookup_url_kwarg = 'quiz_id'
 
     def update(self, request, *args, **kwargs):
         """Handle unified quiz edit"""
@@ -1190,3 +1372,109 @@ class EditQuizView(generics.UpdateAPIView):
     def partial_update(self, request, *args, **kwargs):
         """Handle PATCH requests (same as PUT for this endpoint)"""
         return self.update(request, *args, **kwargs)
+
+# ===================== QUIZ RATING =====================
+
+class RateQuizAttemptView(APIView):
+    """
+    API endpoint to rate a quiz attempt
+
+    POST /api/learning/quiz/attempt/{attempt_id}/rate/
+
+    Request Body:
+    {
+        "rating": 4.5
+    }
+
+    Response:
+    {
+        "success": true,
+        "message": "Rating submitted successfully",
+        "attempt": {
+            "id": "uuid",
+            "rating": 4.5,
+            "quiz_title": "Biology Basics",
+            "attempt_number": 2,
+            "remaining_attempts": 1
+        },
+        "quiz_rating": {
+            "average_rating": 4.2,
+            "rating_count": 15
+        }
+    }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, attempt_id):
+        try:
+            # Get the attempt
+            attempt = get_object_or_404(QuizAttempt, id=attempt_id)
+
+            # Check if user owns this attempt
+            if attempt.user != request.user:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "You can only rate your own quiz attempts"
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Check if already rated
+            if not attempt.can_rate():
+                return Response(
+                    {
+                        "success": False,
+                        "error": "This attempt has already been rated"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Validate rating
+            serializer = RateQuizSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+
+            rating = serializer.validated_data['rating']
+
+            # Save rating to attempt
+            with transaction.atomic():
+                attempt.rating = rating
+                attempt.save()
+
+                # Trigger async task to recalculate quiz rating
+                recalculate_quiz_rating.delay(str(attempt.quiz.id))
+
+            # Serialize response
+            attempt_serializer = QuizAttemptWithRatingSerializer(
+                attempt,
+                context={'request': request}
+            )
+
+            logger.info(
+                f"User {request.user.id} rated quiz attempt {attempt_id} "
+                f"with rating {rating}"
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Rating submitted successfully",
+                    "attempt": attempt_serializer.data,
+                    "quiz_rating": {
+                        "quiz_id": str(attempt.quiz.id),
+                        "message": "Quiz rating is being recalculated"
+                    }
+                },
+                status=status.HTTP_200_OK
+            )
+
+        except Exception as e:
+            logger.error(f"Error in RateQuizAttemptView: {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "error": str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+

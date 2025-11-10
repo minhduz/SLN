@@ -16,10 +16,14 @@ class QuizAnswerOptionSerializer(serializers.ModelSerializer):
 
 class QuizQuestionSerializer(serializers.ModelSerializer):
     answer_options = QuizAnswerOptionSerializer(many=True, read_only=True)
+    attempt_number = serializers.SerializerMethodField()
 
     class Meta:
         model = QuizQuestion
-        fields = ['id', 'question_text', 'answer_options']
+        fields = ['id', 'question_text', 'answer_options', 'attempt_number']
+
+    def get_attempt_number(self, obj):
+        return self.context.get('attempt_number', None)
 
 
 class SubjectSerializer(serializers.ModelSerializer):
@@ -27,22 +31,24 @@ class SubjectSerializer(serializers.ModelSerializer):
         model = Subject
         fields = ['id', 'name', 'description']
 
+
 class UserSerializer(serializers.ModelSerializer):
     """Serializer for User model (basic info only)"""
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'full_name', 'avatar','role']
+        fields = ['id', 'username', 'email', 'full_name', 'avatar', 'role']
         read_only_fields = ['id']
+
 
 class QuizSerializer(serializers.ModelSerializer):
     questions = QuizQuestionSerializer(many=True, read_only=True)
     quiz_type_display = serializers.CharField(source='get_quiz_type_display', read_only=True)
     subject = SubjectSerializer(read_only=True)
-    created_by = UserSerializer(read_only=True)  # ✅ NEW: Added creator info
+    created_by = UserSerializer(read_only=True)
 
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'description', 'language', 'subject', 'quiz_type', 'quiz_type_display', 'questions','created_by','created_at']
+        fields = ['id', 'title', 'description', 'language', 'subject', 'quiz_type', 'quiz_type_display', 'questions', 'created_by', 'created_at']
 
 
 class QuizQuestionPreviewSerializer(serializers.ModelSerializer):
@@ -63,11 +69,19 @@ class QuizDetailPreviewSerializer(serializers.ModelSerializer):
     preview_questions_count = serializers.SerializerMethodField()
     preview_mode = serializers.SerializerMethodField()
 
+    # NEW: Add these fields
+    user_attempt_count = serializers.SerializerMethodField()
+    user_remaining_attempts = serializers.SerializerMethodField()
+    total_attempts_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'description', 'language', 'subject', 'quiz_type',
-                  'quiz_type_display', 'questions', 'created_by', 'created_at',
-                  'total_questions', 'preview_questions_count', 'preview_mode']
+        fields = [
+            'id', 'title', 'description', 'language', 'rating', 'rating_count',  # Added rating_count
+            'subject', 'quiz_type', 'quiz_type_display', 'questions', 'created_by',
+            'created_at', 'total_questions', 'preview_questions_count', 'preview_mode',
+            'user_attempt_count', 'user_remaining_attempts', 'total_attempts_count'  # NEW fields
+        ]
 
     def get_total_questions(self, obj):
         return obj.questions.count()
@@ -78,6 +92,24 @@ class QuizDetailPreviewSerializer(serializers.ModelSerializer):
 
     def get_preview_mode(self, obj):
         return True
+
+    def get_user_attempt_count(self, obj):
+        """Get the number of attempts the current user has made"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.get_attempt_count(request.user)
+        return 0
+
+    def get_user_remaining_attempts(self, obj):
+        """Get remaining attempts for the current user"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.get_user_remaining_attempts(request.user)
+        return 3
+
+    def get_total_attempts_count(self, obj):
+        """Get total number of attempts by all users"""
+        return obj.attempts.count()
 
     def get_questions(self, obj):
         """Get 1/3 random questions without answers"""
@@ -93,16 +125,91 @@ class QuizDetailPreviewSerializer(serializers.ModelSerializer):
             many=True
         ).data
 
+
+# ========== USER QUIZ DETAIL SERIALIZERS (Full Access for Owner) ==========
+
+class AnswerOptionFullSerializer(serializers.ModelSerializer):
+    """Serializer for answer options with correct/incorrect info (for owner)"""
+
+    class Meta:
+        model = QuizAnswerOption
+        fields = ['id', 'option_text', 'is_correct']
+
+
+class QuestionWithAnswersSerializer(serializers.ModelSerializer):
+    """Serializer for questions with all answer options (for owner)"""
+    answer_options = AnswerOptionFullSerializer(many=True, read_only=True)
+    correct_answers = serializers.SerializerMethodField()
+    incorrect_answers = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuizQuestion
+        fields = ['id', 'question_text', 'answer_options', 'correct_answers', 'incorrect_answers']
+
+    def get_correct_answers(self, obj):
+        """Return list of correct answer texts"""
+        return [opt.option_text for opt in obj.answer_options.all() if opt.is_correct]
+
+    def get_incorrect_answers(self, obj):
+        """Return list of incorrect answer texts"""
+        return [opt.option_text for opt in obj.answer_options.all() if not opt.is_correct]
+
+
+class UserQuizDetailSerializer(serializers.ModelSerializer):
+    """Serializer for full quiz details - shows all questions with answers for owner"""
+    questions = QuestionWithAnswersSerializer(many=True, read_only=True)
+    quiz_type_display = serializers.CharField(source='get_quiz_type_display', read_only=True)
+    subject = SubjectSerializer(read_only=True)
+    created_by = UserSerializer(read_only=True)
+    total_questions = serializers.SerializerMethodField()
+
+    # NEW: Add these fields
+    user_attempt_count = serializers.SerializerMethodField()
+    user_remaining_attempts = serializers.SerializerMethodField()
+    total_attempts_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Quiz
+        fields = [
+            'id', 'title', 'description', 'language', 'rating', 'rating_count',  # Added rating_count
+            'subject', 'quiz_type', 'quiz_type_display', 'questions', 'created_by',
+            'created_at', 'total_questions',
+            'user_attempt_count', 'user_remaining_attempts', 'total_attempts_count'  # NEW fields
+        ]
+
+    def get_total_questions(self, obj):
+        return obj.questions.count()
+
+    def get_user_attempt_count(self, obj):
+        """Get the number of attempts the current user has made"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.get_attempt_count(request.user)
+        return 0
+
+    def get_user_remaining_attempts(self, obj):
+        """Get remaining attempts for the current user"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.get_user_remaining_attempts(request.user)
+        return 3
+
+    def get_total_attempts_count(self, obj):
+        """Get total number of attempts by all users"""
+        return obj.attempts.count()
+
+# ========== OTHER SERIALIZERS ==========
+
 class QuizListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for quiz list - excludes questions"""
     quiz_type_display = serializers.CharField(source='get_quiz_type_display', read_only=True)
     subject = SubjectSerializer(read_only=True)
     question_count = serializers.SerializerMethodField()
-    created_by = UserSerializer(read_only=True)  # ✅ NEW: Added creator info
+    created_by = UserSerializer(read_only=True)
 
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'description', 'language', 'subject', 'quiz_type', 'quiz_type_display', 'question_count','created_by','created_at']
+        fields = ['id', 'title', 'description', 'language', 'rating', 'subject', 'quiz_type', 'quiz_type_display', 'question_count', 'created_by', 'created_at']
 
     def get_question_count(self, obj):
         return obj.questions.count()
@@ -258,7 +365,7 @@ class QuizAttemptAnswerSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuizAttemptAnswer
-        fields = ['question_text', 'selected_option_text', 'correct_answer_text', 'is_correct']
+        fields = ['id', 'question_text', 'selected_option_text', 'correct_answer_text', 'is_correct']
 
     def get_correct_answer_text(self, obj):
         correct_option = obj.question.answer_options.filter(is_correct=True).first()
@@ -270,18 +377,22 @@ class QuizAttemptDetailSerializer(serializers.ModelSerializer):
     quiz_title = serializers.CharField(source='quiz.title', read_only=True)
     quiz_id = serializers.CharField(source='quiz.id', read_only=True)
     total_questions = serializers.SerializerMethodField()
+    can_rate = serializers.SerializerMethodField()
 
     class Meta:
         model = QuizAttempt
         fields = [
             'id', 'quiz_id', 'quiz_title', 'score', 'total_questions',
-            'duration_seconds',
+            'duration_seconds', 'rating', 'can_rate',
             'created_at', 'answers'
         ]
 
     def get_total_questions(self, obj):
         return obj.answers.count()
 
+    def get_can_rate(self, obj):
+        """Check if this attempt can still be rated"""
+        return obj.can_rate()
 
 class UserQuizAttemptsSerializer(serializers.ModelSerializer):
     quiz_title = serializers.CharField(source='quiz.title', read_only=True)
@@ -294,11 +405,11 @@ class UserQuizAttemptsSerializer(serializers.ModelSerializer):
 
 class CreateQuizSerializer(serializers.ModelSerializer):
     """Serializer for creating a new quiz (used for both manual and import)"""
-    created_by=UserSerializer(read_only=True)
+    created_by = UserSerializer(read_only=True)
 
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'description', 'subject', 'language','created_by']
+        fields = ['id', 'title', 'description', 'subject', 'language', 'created_by']
         extra_kwargs = {
             'description': {'required': False, 'allow_blank': True}
         }
@@ -391,6 +502,7 @@ class ImportQuestionsFromExcelSerializer(serializers.Serializer):
             raise serializers.ValidationError("File size must not exceed 5MB")
 
         return value
+
 
 # ===================== UNIFIED QUIZ EDIT SERIALIZER =====================
 
@@ -613,3 +725,123 @@ class UnifiedEditQuizSerializer(serializers.Serializer):
                             pass  # Skip if question doesn't exist
 
         return instance
+
+
+class RateQuizSerializer(serializers.Serializer):
+    """Serializer for rating a quiz attempt"""
+    rating = serializers.DecimalField(
+        max_digits=2,
+        decimal_places=1,
+        min_value=0,
+        max_value=5,
+        help_text="Rating from 0 to 5 (e.g., 4.5)"
+    )
+
+    def validate_rating(self, value):
+        """Validate rating is in 0.5 increments"""
+        if (value * 10) % 5 != 0:
+            raise serializers.ValidationError(
+                "Rating must be in 0.5 increments (e.g., 0, 0.5, 1.0, 1.5, ..., 5.0)"
+            )
+        return value
+
+
+class QuizAttemptWithRatingSerializer(serializers.ModelSerializer):
+    """Enhanced QuizAttempt serializer with rating info"""
+    quiz_title = serializers.CharField(source='quiz.title', read_only=True)
+    attempt_number = serializers.SerializerMethodField()
+    can_rate = serializers.SerializerMethodField()
+    remaining_attempts = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuizAttempt
+        fields = [
+            'id', 'quiz_title', 'score', 'duration_seconds',
+            'rating', 'attempt_number', 'can_rate',
+            'remaining_attempts', 'created_at'
+        ]
+
+    def get_attempt_number(self, obj):
+        """Get which attempt number this is (1st, 2nd, 3rd)"""
+        return obj.get_attempt_number()
+
+    def get_can_rate(self, obj):
+        """Check if this attempt can be rated"""
+        return obj.can_rate()
+
+    def get_remaining_attempts(self, obj):
+        """Get remaining attempts for this quiz"""
+        return obj.quiz.get_user_remaining_attempts(obj.user)
+
+
+class QuizWithRatingSerializer(serializers.ModelSerializer):
+    """Quiz serializer with rating information"""
+    questions = serializers.SerializerMethodField()
+    quiz_type_display = serializers.CharField(source='get_quiz_type_display', read_only=True)
+    subject = serializers.SerializerMethodField()
+    created_by = serializers.SerializerMethodField()
+    user_attempt_count = serializers.SerializerMethodField()
+    user_can_attempt = serializers.SerializerMethodField()
+    user_remaining_attempts = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Quiz
+        fields = [
+            'id', 'title', 'description', 'language', 'subject',
+            'quiz_type', 'quiz_type_display', 'rating', 'rating_count',
+            'questions', 'created_by', 'created_at',
+            'user_attempt_count', 'user_can_attempt', 'user_remaining_attempts'
+        ]
+
+    def get_questions(self, obj):
+        """Return question count"""
+        return obj.questions.count()
+
+    def get_subject(self, obj):
+        """Return subject info"""
+        return {
+            'id': str(obj.subject.id),
+            'name': obj.subject.name,
+            'description': obj.subject.description
+        }
+
+    def get_created_by(self, obj):
+        """Return creator info"""
+        if obj.created_by:
+            return {
+                'id': str(obj.created_by.id),
+                'username': obj.created_by.username,
+                'full_name': getattr(obj.created_by, 'full_name', '')
+            }
+        return None
+
+    def get_user_attempt_count(self, obj):
+        """Get user's attempt count for this quiz"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.get_attempt_count(request.user)
+        return 0
+
+    def get_user_can_attempt(self, obj):
+        """Check if user can attempt this quiz"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.can_user_attempt(request.user)
+        return False
+
+    def get_user_remaining_attempts(self, obj):
+        """Get user's remaining attempts"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.get_user_remaining_attempts(request.user)
+        return 0
+
+
+class QuizRatingStatsSerializer(serializers.Serializer):
+    """Serializer for quiz rating statistics"""
+    quiz_id = serializers.UUIDField()
+    quiz_title = serializers.CharField()
+    average_rating = serializers.DecimalField(max_digits=3, decimal_places=2)
+    rating_count = serializers.IntegerField()
+    rating_distribution = serializers.DictField()
+    user_ratings = serializers.ListField()

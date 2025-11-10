@@ -8,11 +8,13 @@ urlpatterns = [
     path('quiz/save-generated/', views.SaveGeneratedQuizView.as_view(), name='save-generated-quiz'),
 
     path('quiz/random/', views.RandomQuizzesView.as_view(), name='random-quizzes'),
+    path('quiz/my-quizzes/', views.UserQuizzesView.as_view(), name='user-quizzes'),
     path('quiz/random/subject/<uuid:subject_id>/', views.RandomQuizzesSubjectView.as_view(), name='random-quizzes-subject'),
     path('quiz/search/', views.SearchQuizzesView.as_view(), name='search-quizzes'),
 
     # Quiz detail and questions
     path('quiz/<uuid:quiz_id>/', views.QuizDetailView.as_view(), name='quiz-detail'),
+    path('quiz/<uuid:quiz_id>/user-detail/', views.UserQuizDetailView.as_view(), name='user-quiz-detail'),
     path('quiz/<uuid:quiz_id>/questions/', views.QuizQuestionListView.as_view(), name='quiz-questions'),
 
     # Quiz submission
@@ -30,4 +32,7 @@ urlpatterns = [
     # ======================== QUIZ EDIT & DELETE ========================
     path('quiz/<uuid:quiz_id>/edit/', views.EditQuizView.as_view(), name='edit-quiz'),
     path('quiz/<uuid:quiz_id>/delete/', views.DeleteQuizView.as_view(), name='delete-quiz'),
+
+    # ======================== QUIZ RATING ========================
+    path('quiz/attempt/<uuid:attempt_id>/rate/', views.RateQuizAttemptView.as_view(), name='rate-quiz-attempt'),
 ]
