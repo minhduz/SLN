@@ -1,7 +1,7 @@
-from django.conf import settings
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import InvalidToken
+from django.utils import timezone
 
 from .models import User
 
@@ -72,6 +72,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # ✅ If user is active, proceed with normal JWT token generation
         # We need to temporarily set the user for the parent class
         self.user = user
+
+        # ✅ Update last_login timestamp
+        user.last_login = timezone.now()
+        user.save(update_fields=['last_login'])
 
         # Call parent validate with modified behavior
         # We'll bypass the parent's authenticate call since we already did it

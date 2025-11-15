@@ -3,6 +3,8 @@ from celery import shared_task
 from django.db.models import Avg, Count
 from decimal import Decimal
 import logging
+from .models import Quiz, QuizAttempt
+from gamification.services.tracking_services import MissionService
 
 logger = logging.getLogger(__name__)
 
@@ -11,9 +13,11 @@ logger = logging.getLogger(__name__)
 def recalculate_quiz_rating(self, quiz_id):
     """
     Celery task to recalculate the average rating for a quiz
+    AND track 'create_quiz' mission if rating reaches 4+ stars
 
     This task is triggered whenever a user rates a quiz attempt.
-    It calculates the average rating from all rated attempts.
+    It calculates the average rating from all rated attempts and
+    tracks the create_quiz mission if the quiz reaches 4+ stars.
 
     Args:
         quiz_id (str): UUID of the quiz
@@ -22,10 +26,11 @@ def recalculate_quiz_rating(self, quiz_id):
         dict: Result with updated rating info
     """
     try:
-        from .models import Quiz, QuizAttempt
-
         # Get the quiz
         quiz = Quiz.objects.get(id=quiz_id)
+
+        # Store old rating to detect if it crossed the 4.0 threshold
+        old_rating = quiz.rating if quiz.rating else Decimal('0.00')
 
         # Calculate average rating from all rated attempts
         rating_stats = QuizAttempt.objects.filter(
@@ -41,120 +46,70 @@ def recalculate_quiz_rating(self, quiz_id):
 
         # Update quiz rating
         if avg_rating is not None:
-            quiz.rating = Decimal(str(round(float(avg_rating), 2)))
+            new_rating = Decimal(str(round(float(avg_rating), 2)))
+            quiz.rating = new_rating
             quiz.rating_count = rating_count
         else:
-            quiz.rating = Decimal('0.00')
+            new_rating = Decimal('0.00')
+            quiz.rating = new_rating
             quiz.rating_count = 0
 
         quiz.save(update_fields=['rating', 'rating_count', 'updated_at'])
 
         logger.info(
-            f"Quiz {quiz_id} rating recalculated: "
-            f"{quiz.rating} (from {rating_count} ratings)"
+            f"📊 Quiz {quiz_id} rating recalculated: "
+            f"{old_rating} → {quiz.rating} (from {rating_count} ratings)"
         )
+
+        # ============================================================
+        # MISSION TRACKING: create_quiz (4+ stars)
+        # ============================================================
+        # Check if quiz just reached 4.0+ stars (crossed threshold)
+        if quiz.rating >= Decimal('4.0') > old_rating:
+            try:
+                quiz_creator = quiz.created_by
+
+                if quiz_creator and quiz_creator.is_authenticated:
+                    # Prepare mission tracking context
+                    context_data = {
+                        'quiz_id': str(quiz.id),
+                        'rating': float(quiz.rating),
+                        'min_rating': 4.0,
+                        'rating_count': rating_count
+                    }
+
+                    # Track the mission for the quiz creator
+                    MissionService.track_mission_progress(
+                        user=quiz_creator,
+                        mission_type='create_quiz',
+                        context_data=context_data
+                    )
+
+                    logger.info(
+                        f"✅ Tracked 'create_quiz' mission for user {quiz_creator.id} "
+                        f"on quiz {quiz.id} with rating {quiz.rating} stars "
+                        f"(crossed 4.0 threshold from {old_rating})"
+                    )
+                else:
+                    logger.warning(f"⚠️ Quiz creator not authenticated for create_quiz mission")
+
+            except Exception as mission_error:
+                # Don't fail the entire task if mission tracking fails
+                logger.error(
+                    f"❌ Error tracking create_quiz mission for quiz {quiz_id}: {str(mission_error)}",
+                    exc_info=True
+                )
 
         return {
             'success': True,
             'quiz_id': str(quiz_id),
-            'average_rating': float(quiz.rating),
-            'rating_count': rating_count
+            'old_rating': float(old_rating),
+            'new_rating': float(quiz.rating),
+            'rating_count': rating_count,
+            'mission_tracked': quiz.rating >= Decimal('4.0') > old_rating
         }
 
     except Exception as e:
         logger.error(f"Error recalculating rating for quiz {quiz_id}: {str(e)}")
         # Retry the task
         raise self.retry(exc=e, countdown=60)
-
-
-@shared_task
-def recalculate_all_quiz_ratings():
-    """
-    Celery task to recalculate ratings for ALL quizzes
-
-    This is useful for:
-    - Initial migration when adding the rating system
-    - Periodic maintenance
-    - Fixing any data inconsistencies
-
-    Can be run manually or scheduled in CELERY_BEAT_SCHEDULE
-    """
-    try:
-        from .models import Quiz
-
-        quizzes = Quiz.objects.all()
-        total_quizzes = quizzes.count()
-        updated_count = 0
-
-        logger.info(f"Starting recalculation of ratings for {total_quizzes} quizzes")
-
-        for quiz in quizzes:
-            try:
-                # Trigger individual recalculation task
-                recalculate_quiz_rating.delay(str(quiz.id))
-                updated_count += 1
-            except Exception as e:
-                logger.error(f"Failed to queue rating recalculation for quiz {quiz.id}: {str(e)}")
-
-        logger.info(
-            f"Queued rating recalculation for {updated_count}/{total_quizzes} quizzes"
-        )
-
-        return {
-            'success': True,
-            'total_quizzes': total_quizzes,
-            'queued_count': updated_count
-        }
-
-    except Exception as e:
-        logger.error(f"Error in recalculate_all_quiz_ratings: {str(e)}")
-        return {
-            'success': False,
-            'error': str(e)
-        }
-
-
-@shared_task
-def cleanup_unrated_old_attempts():
-    """
-    Celery task to send reminders or cleanup unrated attempts older than X days
-
-    This can be used to:
-    - Remind users to rate their attempts
-    - Auto-expire old attempts without ratings
-    - Generate analytics on rating participation
-    """
-    try:
-        from .models import QuizAttempt
-        from django.utils import timezone
-        from datetime import timedelta
-
-        # Get attempts older than 7 days without ratings
-        cutoff_date = timezone.now() - timedelta(days=7)
-
-        unrated_attempts = QuizAttempt.objects.filter(
-            rating__isnull=True,
-            created_at__lt=cutoff_date
-        ).select_related('user', 'quiz')
-
-        count = unrated_attempts.count()
-
-        logger.info(f"Found {count} unrated attempts older than 7 days")
-
-        # You could:
-        # 1. Send reminder emails/notifications
-        # 2. Auto-expire these attempts
-        # 3. Just log for analytics
-
-        return {
-            'success': True,
-            'unrated_attempts_count': count,
-            'cutoff_date': cutoff_date.isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in cleanup_unrated_old_attempts: {str(e)}")
-        return {
-            'success': False,
-            'error': str(e)
-        }

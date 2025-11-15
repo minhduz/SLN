@@ -352,10 +352,15 @@ class SubmitQuizSerializer(serializers.Serializer):
 
 class QuizAttemptSerializer(serializers.ModelSerializer):
     quiz_title = serializers.CharField(source='quiz.title', read_only=True)
+    can_rate = serializers.SerializerMethodField()
 
     class Meta:
         model = QuizAttempt
-        fields = ['id', 'quiz_title', 'score', 'duration_seconds', 'created_at']
+        fields = ['id', 'quiz_title', 'score', 'duration_seconds','rating', 'can_rate', 'created_at']
+
+    def get_can_rate(self, obj):
+        """Check if this attempt can be rated (rating is None)"""
+        return obj.rating is None
 
 
 class QuizAttemptAnswerSerializer(serializers.ModelSerializer):

@@ -1,17 +1,23 @@
+# economy/models.py
 from django.conf import settings
 from django.db import models
 import uuid
-
-from django.db.models.fields.tuple_lookups import Tuple
 
 
 class Currency(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True)
-    image_url = models.URLField()
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Add this method to display name instead of UUID
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name_plural = "Currencies"
+
 
 class UserCurrency(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -21,15 +27,27 @@ class UserCurrency(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def __str__(self):
+        return f"{self.user.username} - {self.currency.name}: {self.balance}"
+
+    class Meta:
+        verbose_name_plural = "User Currencies"
+        unique_together = ('user', 'currency')
+
+
 class Package(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     ai_question_limit_per_day = models.IntegerField(default=0)
-    duration = models.IntegerField(default=0) # By Days
+    duration = models.IntegerField(default=0)  # By Days
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
 
 class UserPackage(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -41,3 +59,5 @@ class UserPackage(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def __str__(self):
+        return f"{self.user.username} - {self.package.name}"

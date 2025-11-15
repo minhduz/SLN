@@ -278,6 +278,11 @@ CELERY_BEAT_SCHEDULE = {
         'schedule': crontab(minute='*/30', hour='9-17'),  # Every 30 min during business hours
         'kwargs': {'hours_old': 1}  # Clean files older than 1 hour during peak
     },
+
+    'cleanup-old-missions': {
+        'task': 'gamification.tasks.cleanup_old_missions',
+        'schedule': crontab(hour=3, minute=0),  # Every day at 3:00 AM
+    },
 }
 
 SIMPLE_JWT = {

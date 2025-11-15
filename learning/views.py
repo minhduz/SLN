@@ -11,6 +11,7 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from .tasks import recalculate_quiz_rating
+from gamification.mixins import MissionTrackingMixin
 
 from .models import Quiz, QuizQuestion, QuizAnswerOption, QuizAttempt, QuizAttemptAnswer
 from .serializers import (
