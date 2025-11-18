@@ -19,7 +19,6 @@ class Question(models.Model):
     title = models.CharField(max_length=255)
     body = models.TextField()
     is_public = models.BooleanField(default=False)
-    popularity_score = models.PositiveIntegerField(default=0)
     embedding = models.JSONField(blank=True, null=True)
     # New field: Only one answer can be marked as verified by the question owner
     verified_answer = models.ForeignKey(

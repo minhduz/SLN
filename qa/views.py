@@ -120,7 +120,6 @@ class SimilarQuestionsView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class VectorSearchStatsView(APIView):
     """
     API endpoint to get statistics about the vector search database
@@ -259,7 +258,6 @@ class ChatWithBotView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class GetConversationStatusView(APIView):
     """
     GET /api/chat/status/
@@ -356,7 +354,6 @@ class ClearConversationView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
 
 # ============================================================================
 # ANSWER CRUD OPERATIONS
@@ -533,7 +530,6 @@ class AnswerDetailView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class VerifyAnswerView(APIView):
     """
     POST /api/qa/questions/<question_id>/verify-answer/
@@ -596,7 +592,6 @@ class VerifyAnswerView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class DisproveAnswerView(APIView):
     """
     DELETE /api/qa/questions/<question_id>/verify-answer/
@@ -640,59 +635,106 @@ class DisproveAnswerView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class RandomQuestionsView(APIView):
     """
     GET /api/qa/questions/random/
-    Get random public questions for the authenticated user (excluding their own questions)
+    Get random public questions with popularity-based distribution
+
+    Query Parameters:
+    - page (int): Page number (default: 1)
+    - page_size (int): Number of questions per page (default: 10, max: 50)
+
+    Returns paginated random questions with:
+    - 30% from high popularity questions
+    - 30% from medium popularity questions
+    - 40% from low popularity questions
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         try:
-            limit = int(request.query_params.get("limit", 10))
-            limit = min(max(limit, 1), 50)  # constrain 1–50
+            # Get pagination parameters
+            page = int(request.query_params.get("page", 1))
+            page_size = int(request.query_params.get("page_size", 10))
 
-            questions = get_random_questions_for_user(request.user.id, limit=limit)
+            # Validate pagination parameters
+            page = max(page, 1)  # Minimum page 1
+            page_size = min(max(page_size, 1), 50)  # Constrain 1-50
 
+            # Get random questions with popularity distribution
+            questions = get_random_questions_for_user(
+                user_id=request.user.id,
+                page=page,
+                page_size=page_size
+            )
+
+            # Serialize the questions
             serializer = QuestionListSerializer(
                 questions, many=True, context={"request": request}
             )
 
             return Response(
                 {
+                    "page": page,
+                    "page_size": page_size,
                     "count": len(serializer.data),
                     "results": serializer.data,
                 },
                 status=status.HTTP_200_OK,
             )
 
+        except ValueError as e:
+            logger.error(f"Invalid pagination parameters: {str(e)}")
+            return Response(
+                {"error": "Invalid pagination parameters"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception as e:
-            logger.error(f"Error fetching random questions: {str(e)}")
+            logger.error(f"Error fetching random questions: {str(e)}", exc_info=True)
             return Response(
                 {"error": "Failed to fetch random questions"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-
 class QuestionsBySubjectView(APIView):
     """
-    GET /api/qa/questions/by-subject/?subject_id=<uuid>&limit=5
-    Get random public questions by subject (excluding user's own questions)
+    GET /api/qa/questions/by-subject/?subject_id=<uuid>&page=1&page_size=10
+    Get random public questions by subject with pagination (excluding user's own questions)
+
+    Query Parameters:
+    - subject_id (uuid): The subject ID to filter questions
+    - page (int): Page number (default: 1)
+    - page_size (int): Number of questions per page (default: 10, max: 50)
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         try:
             subject_id = request.query_params.get('subject_id')
+            if not subject_id:
+                return Response(
+                    {'error': 'subject_id is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             subject = get_object_or_404(Subject, id=subject_id)
 
-            limit = int(request.query_params.get('limit', 10))
-            limit = min(max(limit, 1), 50)
+            # Get pagination parameters
+            page = int(request.query_params.get('page', 1))
+            page_size = int(request.query_params.get('page_size', 10))
+
+            # Validate pagination parameters
+            page = max(page, 1)  # Minimum page 1
+            page_size = min(max(page_size, 1), 50)  # Constrain 1-50
 
             # Pass authenticated user_id to exclude their own questions
             user_id = request.user.id
-            questions = get_random_questions_by_subject(subject.id, user_id, limit=limit)
+            questions = get_random_questions_by_subject(
+                subject_id=subject.id,
+                user_id=user_id,
+                page=page,
+                page_size=page_size
+            )
 
             serializer = QuestionListSerializer(
                 questions,
@@ -706,17 +748,24 @@ class QuestionsBySubjectView(APIView):
                     'name': subject.name,
                     'description': subject.description
                 },
+                'page': page,
+                'page_size': page_size,
                 'count': len(serializer.data),
                 'results': serializer.data
             }, status=status.HTTP_200_OK)
 
+        except ValueError as e:
+            logger.error(f"Invalid pagination parameters: {str(e)}")
+            return Response(
+                {'error': 'Invalid pagination parameters'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
-            logger.error(f"Error fetching random questions by subject: {str(e)}")
+            logger.error(f"Error fetching random questions by subject: {str(e)}", exc_info=True)
             return Response(
                 {'error': 'Failed to fetch questions by subject'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class QuestionView(APIView):
     """
@@ -816,7 +865,6 @@ class QuestionView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class QuestionVisibilityView(APIView):
     """
     PATCH /api/qa/questions/visibility/
@@ -907,7 +955,6 @@ class UserQuestionsListView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class UserQuestionViewAPI(generics.GenericAPIView):
     """API to record when a user views a question (no duplicates)."""
     permission_classes = [IsAuthenticated]
@@ -941,7 +988,6 @@ class UserQuestionViewAPI(generics.GenericAPIView):
         ).data
         return Response(question_data, status=status.HTTP_200_OK)
 
-
 class SubjectListView(APIView):
     """
     GET /api/qa/subjects/
@@ -970,7 +1016,6 @@ class SubjectListView(APIView):
                 {'error': 'Failed to fetch subjects'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class SearchSubjectsView(APIView):
     """
@@ -1165,7 +1210,6 @@ class TempCreateQuestionView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class TempQuestionStatusView(APIView):
     """
     Check the status of a question's embedding generation
@@ -1209,7 +1253,6 @@ class TempQuestionStatusView(APIView):
                 {'error': 'Failed to check question status'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 
 class TempBulkCreateQuestionsView(APIView):
     """

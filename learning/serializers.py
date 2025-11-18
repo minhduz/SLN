@@ -114,6 +114,10 @@ class QuizDetailPreviewSerializer(serializers.ModelSerializer):
     def get_questions(self, obj):
         """Get 1/3 random questions without answers"""
         all_questions = list(obj.questions.all())
+        # If no questions exist → return empty list
+        if not all_questions:
+            return []
+
         total_count = len(all_questions)
         preview_count = max(1, total_count // 3)
 

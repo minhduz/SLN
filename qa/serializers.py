@@ -78,11 +78,11 @@ class QuestionSerializer(serializers.ModelSerializer):
         model = Question
         fields = [
             'id', 'user', 'subject', 'subject_id', 'title', 'body',
-            'is_public', 'popularity_score', 'attachments', 'answers',
+            'is_public', 'attachments', 'answers',
             'verified_answer', 'answer_count', 'view_count',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'user', 'popularity_score', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
 
     def get_answer_count(self, obj):
         return obj.answers.count()
@@ -121,10 +121,10 @@ class QuestionListSerializer(serializers.ModelSerializer):
         model = Question
         fields = [
             'id', 'user', 'subject', 'subject_id', 'title', 'body',
-            'is_public', 'popularity_score', 'answer_count', 'view_count',
+            'is_public', 'answer_count', 'view_count',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'user', 'popularity_score', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
 
     def get_answer_count(self, obj):
         return obj.answers.count()
@@ -170,7 +170,6 @@ class QuestionDataSerializer(serializers.Serializer):
     subject_name = serializers.CharField(allow_null=True)
     subject_id = serializers.UUIDField(allow_null=True)
     user_name = serializers.CharField()
-    popularity_score = serializers.IntegerField()
     created_at = serializers.DateTimeField()
     answer_count = serializers.IntegerField()
     is_public = serializers.BooleanField()

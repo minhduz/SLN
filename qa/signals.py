@@ -1,13 +1,16 @@
 """
-Signals for mission tracking in QA app
-These signals automatically track mission progress when questions are created
+Signals for mission tracking and popularity score calculation in QA app
+These signals automatically track mission progress and update question popularity
+when questions are created, answered, and viewed
 """
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.db.models import F
 from gamification.services.tracking_services import MissionService
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 @receiver(post_save, sender='qa.Question')
 def track_question_save_mission(sender, instance, created, **kwargs):
@@ -50,6 +53,7 @@ def track_question_save_mission(sender, instance, created, **kwargs):
             exc_info=True
         )
 
+
 # ============================================================================
 # ANSWER_QUESTION MISSION (NEW)
 # ============================================================================
@@ -58,7 +62,7 @@ def track_question_save_mission(sender, instance, created, **kwargs):
 def track_answer_question_mission(sender, instance, created, **kwargs):
     """
     Signal handler: Track 'answer_question' mission when an answer is created
-    by a community member.
+    by a community member AND update the question's popularity score.
 
     This is triggered whenever an Answer instance is saved to the database.
     We only track on creation (not updates) and only for non-AI-generated answers
@@ -66,6 +70,8 @@ def track_answer_question_mission(sender, instance, created, **kwargs):
 
     The mission tracks when users create answers to questions, contributing
     to the community knowledge base.
+
+    Popularity Score: +2 points for each answer to the question
     """
     if not created:
         return
@@ -88,6 +94,27 @@ def track_answer_question_mission(sender, instance, created, **kwargs):
         # Get the question this answer belongs to
         question = instance.question
 
+        # ============================================================
+        # UPDATE POPULARITY SCORE: +2 points for each answer
+        # ============================================================
+        try:
+            from qa.models import Question
+            Question.objects.filter(id=question.id).update(
+                popularity_score=F('popularity_score') + 2
+            )
+            logger.info(
+                f"Updated popularity score (+2) for question {question.id} "
+                f"due to new answer {instance.id}"
+            )
+        except Exception as score_error:
+            logger.error(
+                f"Error updating popularity score for question {question.id}: {str(score_error)}",
+                exc_info=True
+            )
+
+        # ============================================================
+        # TRACK MISSION
+        # ============================================================
         # Prepare mission tracking context
         context_data = {
             'question_id': str(question.id),
@@ -103,13 +130,13 @@ def track_answer_question_mission(sender, instance, created, **kwargs):
         )
 
         logger.info(
-            f"✅ Tracked 'answer_question' mission for user {user.id} "
+            f"Tracked 'answer_question' mission for user {user.id} "
             f"on answer {instance.id} to question {question.id}"
         )
 
     except Exception as e:
         logger.error(
-            f"❌ Error tracking answer_question mission for answer {instance.id}: {str(e)}",
+            f"Error tracking answer_question mission for answer {instance.id}: {str(e)}",
             exc_info=True
         )
 
@@ -150,7 +177,7 @@ def track_verification_missions(sender, instance, created, **kwargs):
         question_owner = instance.user
 
         if not question_owner or not question_owner.is_authenticated:
-            logger.warning(f"⚠️ Question owner not authenticated for verification missions")
+            logger.warning(f"Question owner not authenticated for verification missions")
             return
 
         # Get the verified answer and its author
@@ -158,11 +185,11 @@ def track_verification_missions(sender, instance, created, **kwargs):
         answer_author = verified_answer.user
 
         if not answer_author or not answer_author.is_authenticated:
-            logger.warning(f"⚠️ Answer author not authenticated for verification missions")
+            logger.warning(f"Answer author not authenticated for verification missions")
             return
 
         logger.info(
-            f"🎯 Verification event detected: "
+            f"Verification event detected: "
             f"question_owner={question_owner.id}, "
             f"answer_author={answer_author.id}, "
             f"question={instance.id}, "
@@ -185,7 +212,7 @@ def track_verification_missions(sender, instance, created, **kwargs):
         )
 
         logger.info(
-            f"✅ Tracked 'verify_answer' mission for question owner {question_owner.id} "
+            f"Tracked 'verify_answer' mission for question owner {question_owner.id} "
             f"on question {instance.id}"
         )
 
@@ -205,13 +232,13 @@ def track_verification_missions(sender, instance, created, **kwargs):
         )
 
         logger.info(
-            f"✅ Tracked 'get_verified' mission for answer author {answer_author.id} "
+            f"Tracked 'get_verified' mission for answer author {answer_author.id} "
             f"on answer {verified_answer.id}"
         )
 
     except Exception as e:
         logger.error(
-            f"❌ Error tracking verification missions for question {instance.id}: {str(e)}",
+            f"Error tracking verification missions for question {instance.id}: {str(e)}",
             exc_info=True
         )
 
@@ -219,11 +246,14 @@ def track_verification_missions(sender, instance, created, **kwargs):
 @receiver(post_save, sender='qa.UserQuestionView')
 def track_view_question_mission(sender, instance, created, **kwargs):
     """
-    Signal handler: Track 'view_question' mission when a user views a question.
+    Signal handler: Track 'view_question' mission when a user views a question
+    AND update the question's popularity score.
 
     This is triggered whenever a UserQuestionView instance is created.
     We only track on creation (not updates) and only for questions viewed by
     users other than the question owner.
+
+    Popularity Score: +1 point for each unique view of the question
 
     Args:
         sender: The model class (qa.UserQuestionView)
@@ -240,15 +270,36 @@ def track_view_question_mission(sender, instance, created, **kwargs):
         user = instance.user
         question = instance.question
 
-        logger.info(f"🔍 View signal triggered: user={user.id}, question={question.id}, created={created}")
+        logger.info(f"View signal triggered: user={user.id}, question={question.id}, created={created}")
 
         if not user or not user.is_authenticated:
-            logger.warning(f"⚠️ User not authenticated for view mission tracking")
+            logger.warning(f"User not authenticated for view mission tracking")
             return
 
-        # Optional: Skip if user is viewing their own question
+        # ============================================================
+        # UPDATE POPULARITY SCORE: +1 point for each view
+        # ============================================================
+        try:
+            from qa.models import Question
+            Question.objects.filter(id=question.id).update(
+                popularity_score=F('popularity_score') + 1
+            )
+            logger.info(
+                f"Updated popularity score (+1) for question {question.id} "
+                f"due to view by user {user.id}"
+            )
+        except Exception as score_error:
+            logger.error(
+                f"Error updating popularity score for question {question.id}: {str(score_error)}",
+                exc_info=True
+            )
+
+        # ============================================================
+        # TRACK MISSION
+        # ============================================================
+        # Optional: Skip mission tracking if user is viewing their own question
         if question.user_id == user.id:
-            logger.info(f"⏭️ Skipping view mission - user viewing own question")
+            logger.info(f"Skipping view mission - user viewing own question (but score was updated)")
             return
 
         # Prepare mission tracking context
@@ -266,12 +317,12 @@ def track_view_question_mission(sender, instance, created, **kwargs):
         )
 
         logger.info(
-            f"✅ Tracked 'view_question' mission for user {user.id} "
+            f"Tracked 'view_question' mission for user {user.id} "
             f"on question {question.id}"
         )
 
     except Exception as e:
         logger.error(
-            f"❌ Error tracking view_question mission for view record: {str(e)}",
+            f"Error tracking view_question mission for view record: {str(e)}",
             exc_info=True
         )
