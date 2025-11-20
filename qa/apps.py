@@ -11,9 +11,9 @@ class QaConfig(AppConfig):
 
         try:
             import qa.signals  # noqa - Import signals to register handlers
-            logger.debug("✅ QA mission tracking signals registered (save_question, answer_question, get_verified, verify_answer)")
+            logger.debug("QA mission tracking signals registered (save_question, answer_question, get_verified, verify_answer)")
         except ImportError as e:
-            logger.error(f"❌ Failed to import qa.signals: {e}")
+            logger.error(f"Failed to import qa.signals: {e}")
 
         """Initialize the chatbot when Django starts up"""
         # Only initialize in the main process, not in migration or other management commands

@@ -4,8 +4,11 @@ from django.utils import timezone
 from datetime import timedelta
 from gamification.models import Mission, UserMission, MissionReward
 from economy.models import UserCurrency
+
 from .reset_services import MissionResetService
 import logging
+
+from .squad_mission_services import SquadMissionService
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +369,38 @@ class MissionService:
 
         user_mission.save()
         logger.info(f"UserMission saved | id={user_mission.id} | metadata={user_mission.metadata}")
+
+        # ✅ UPDATED: If mission was just completed, check squad mission progress
+        if user_mission.is_completed and user_mission.completed_at:
+            # Check if user is in any squads
+            from squads.models import SquadMember
+
+            logger.info(
+                f"🎯 Individual mission completed, checking squad missions for {user_mission.user.username}"
+            )
+
+            # ✅ Changed: Use squads_members instead of squad_members
+            user_squad_memberships = SquadMember.objects.filter(
+                user=user_mission.user
+            ).select_related('squad')
+
+            logger.info(f"  User is in {user_squad_memberships.count()} squads")
+
+            for membership in user_squad_memberships:
+                try:
+                    logger.info(f"  → Checking squad: {membership.squad.name}")
+                    SquadMissionService.check_member_completion(
+                        user=user_mission.user,
+                        squad=membership.squad,
+                        cycle_date=user_mission.cycle_date,
+                        cycle_type=user_mission.mission.cycle
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error checking squad mission for user {user_mission.user.id} "
+                        f"in squad {membership.squad.id}: {str(e)}",
+                        exc_info=True
+                    )
 
     @staticmethod
     @transaction.atomic

@@ -8,7 +8,7 @@ class Squad(models.Model):
     description = models.TextField(blank=True,null=True)
     max_members = models.IntegerField(default=5)
     min_members = models.IntegerField(default=3)
-    avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
+    avatar = models.ImageField(upload_to='squad_avatars/', blank=True, null=True)
     create_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='created_squads')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

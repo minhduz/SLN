@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (RegisterView, CustomTokenObtainPairView, CustomTokenRefreshView,
-                    LogoutView, UserProfileView, UpdateUserView, SendOTPView, VerifyOTPView)
+                    LogoutView, UserProfileView, UpdateUserView, SendOTPView, VerifyOTPView, UserSearchView)
 
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
@@ -9,6 +9,7 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="logout"),
     path("users/me", UserProfileView.as_view(), name="user-profile"),
     path("users/", UpdateUserView.as_view(), name="update-user-profile"),
+    path("users/search/", UserSearchView.as_view(), name="user-search"),  # Add this line
     path("send-otp/", SendOTPView.as_view(), name="send-otp"),
     path("verify-otp/", VerifyOTPView.as_view(), name="verify-otp"),
 ]

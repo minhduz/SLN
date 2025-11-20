@@ -1,4 +1,6 @@
 import os
+from typing import List  # Add this import
+from django.db.models import Q  # Add this import
 
 from django.conf import settings
 from ..models import User, UserVerification
@@ -90,3 +92,35 @@ class UserService:
             return False
 
         return True
+
+    @staticmethod
+    def search_users(query: str, exclude_user_id=None, exclude_admin=True, limit: int = 20) -> List[User]:
+        if not query or len(query.strip()) < 2:
+            return []
+
+        query = query.strip()
+
+        # Search across username, email, and full_name
+        # Using Q objects for complex queries
+        search_filter = (
+                Q(username__icontains=query) |
+                Q(email__icontains=query) |
+                Q(full_name__icontains=query)
+        )
+
+        # Only return active users
+        queryset = User.objects.filter(search_filter, is_active=True)
+
+        # Exclude specific user if provided (e.g., don't show current user in search)
+        if exclude_user_id:
+            queryset = queryset.exclude(id=exclude_user_id)
+
+        # Exclude admin and staff users
+        if exclude_admin:
+            queryset = queryset.filter(is_staff=False, is_superuser=False)
+
+        # Order by relevance: exact matches first, then partial matches
+        # Prioritize username matches over email/full_name
+        queryset = queryset.order_by('username')[:limit]
+
+        return list(queryset)

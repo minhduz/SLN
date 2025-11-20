@@ -128,3 +128,8 @@ class VerifyOTPSerializer(serializers.Serializer):
     purpose = serializers.ChoiceField(choices=[(p, p) for p in PURPOSES])
     code = serializers.CharField()
 
+class UserSearchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "full_name", "avatar", "role", "bio"]
+

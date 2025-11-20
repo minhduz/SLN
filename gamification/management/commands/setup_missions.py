@@ -144,4 +144,77 @@ class Command(BaseCommand):
                 MissionReward.objects.create(mission=mission, currency=diamond, amount=25)
                 self.stdout.write(self.style.SUCCESS(f'✓ Created weekly mission: {mission.title}'))
 
+        # Create squad missions (require all members to complete)
+        squad_missions = [
+            {
+                'title': 'Squad Daily Challenge',
+                'description': 'All squad members complete their daily missions',
+                'type': 'other',
+                'cycle': 'daily',
+                'target_count': 1,
+                'conditions': {},
+                'access_type': 'squad',
+                'require_all_members': True,
+            },
+            {
+                'title': 'Squad Weekly Goal',
+                'description': 'All squad members complete their weekly missions',
+                'type': 'other',
+                'cycle': 'weekly',
+                'target_count': 1,
+                'conditions': {},
+                'access_type': 'squad',
+                'require_all_members': True,
+            },
+        ]
+
+        squad_mission_rewards = [
+            {
+                'title': 'Squad Daily Challenge',
+                'rewards': [
+                    {'currency': gold, 'amount': 3000},
+                    {'currency': diamond, 'amount': 25},
+                ]
+            },
+            {
+                'title': 'Squad Weekly Goal',
+                'rewards': [
+                    {'currency': gold, 'amount': 10000},
+                    {'currency': diamond, 'amount': 75},
+                ]
+            },
+        ]
+
+        for mission_data in squad_missions:
+            mission, created = Mission.objects.get_or_create(
+                title=mission_data['title'],
+                defaults={
+                    'description': mission_data['description'],
+                    'type': mission_data['type'],
+                    'cycle': mission_data['cycle'],
+                    'target_count': mission_data['target_count'],
+                    'conditions': mission_data['conditions'],
+                    'access_type': mission_data['access_type'],
+                    'require_all_members': mission_data['require_all_members'],
+                    'is_active': True,
+                }
+            )
+
+            if created:
+                # Add rewards
+                reward_config = next(
+                    (r for r in squad_mission_rewards if r['title'] == mission_data['title']),
+                    None
+                )
+
+                if reward_config:
+                    for reward in reward_config['rewards']:
+                        MissionReward.objects.create(
+                            mission=mission,
+                            currency=reward['currency'],
+                            amount=reward['amount']
+                        )
+
+                self.stdout.write(self.style.SUCCESS(f'✓ Created squad mission: {mission.title}'))
+
         self.stdout.write(self.style.SUCCESS('\n✅ All missions created successfully!'))

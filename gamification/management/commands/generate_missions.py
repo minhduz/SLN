@@ -1,7 +1,7 @@
 # gamification/management/commands/generate_missions.py
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from gamification.models import Mission, UserMission
+from gamification.models import Mission, UserMission, SquadMissionProgress
 from gamification.utils import get_user_current_date, get_user_timezone
 from django.contrib.auth import get_user_model
 from datetime import timedelta
@@ -195,6 +195,65 @@ class Command(BaseCommand):
                         self.stdout.write(
                             self.style.WARNING('   ⚠️  No active weekly missions found')
                         )
+
+        # ==================== SQUAD MISSIONS ====================
+        from squads.models import Squad
+        from gamification.services.squad_mission_services import SquadMissionService
+
+        self.stdout.write('\n' + '=' * 70)
+        self.stdout.write('GENERATING SQUAD MISSIONS')
+        self.stdout.write('=' * 70)
+
+        squads = Squad.objects.all()
+        squad_missions_created = 0
+
+        for squad in squads:
+            # Get a sample member to determine their timezone
+            sample_membership = squad.memberships.select_related('user').first()
+
+            if not sample_membership:
+                self.stdout.write(
+                    self.style.WARNING(f'⚠️  Squad {squad.name} has no members, skipping')
+                )
+                continue
+
+            user_today = get_user_current_date(sample_membership.user)
+            user_tz = get_user_timezone(sample_membership.user)
+
+            self.stdout.write(f'\n🏆 Squad: {squad.name} ({squad.memberships.count()} members)')
+            self.stdout.write(f'   Using timezone from member: {sample_membership.user.username} ({user_tz})')
+
+            # Daily squad missions
+            if generate_daily:
+                SquadMissionService.ensure_squad_has_missions(
+                    squad=squad,
+                    cycle_date=user_today,
+                    cycle_type='daily'
+                )
+                daily_created = SquadMissionProgress.objects.filter(
+                    squad=squad,
+                    cycle_date=user_today,
+                    mission__cycle='daily'
+                ).count()
+                squad_missions_created += daily_created
+                self.stdout.write(f'   ✅ Daily squad missions: {daily_created}')
+
+            # Weekly squad missions
+            if generate_weekly:
+                monday = user_today - timedelta(days=user_today.weekday())
+                SquadMissionService.ensure_squad_has_missions(
+                    squad=squad,
+                    cycle_date=monday,
+                    cycle_type='weekly'
+                )
+                weekly_created = SquadMissionProgress.objects.filter(
+                    squad=squad,
+                    cycle_date=monday,
+                    mission__cycle='weekly'
+                ).count()
+                squad_missions_created += weekly_created
+                self.stdout.write(f'   ✅ Weekly squad missions: {weekly_created}')
+
 
         # Final summary
         self.stdout.write('\n' + '=' * 70)

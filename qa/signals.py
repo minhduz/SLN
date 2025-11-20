@@ -95,24 +95,6 @@ def track_answer_question_mission(sender, instance, created, **kwargs):
         question = instance.question
 
         # ============================================================
-        # UPDATE POPULARITY SCORE: +2 points for each answer
-        # ============================================================
-        try:
-            from qa.models import Question
-            Question.objects.filter(id=question.id).update(
-                popularity_score=F('popularity_score') + 2
-            )
-            logger.info(
-                f"Updated popularity score (+2) for question {question.id} "
-                f"due to new answer {instance.id}"
-            )
-        except Exception as score_error:
-            logger.error(
-                f"Error updating popularity score for question {question.id}: {str(score_error)}",
-                exc_info=True
-            )
-
-        # ============================================================
         # TRACK MISSION
         # ============================================================
         # Prepare mission tracking context
@@ -275,24 +257,6 @@ def track_view_question_mission(sender, instance, created, **kwargs):
         if not user or not user.is_authenticated:
             logger.warning(f"User not authenticated for view mission tracking")
             return
-
-        # ============================================================
-        # UPDATE POPULARITY SCORE: +1 point for each view
-        # ============================================================
-        try:
-            from qa.models import Question
-            Question.objects.filter(id=question.id).update(
-                popularity_score=F('popularity_score') + 1
-            )
-            logger.info(
-                f"Updated popularity score (+1) for question {question.id} "
-                f"due to view by user {user.id}"
-            )
-        except Exception as score_error:
-            logger.error(
-                f"Error updating popularity score for question {question.id}: {str(score_error)}",
-                exc_info=True
-            )
 
         # ============================================================
         # TRACK MISSION

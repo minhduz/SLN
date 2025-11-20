@@ -1,6 +1,8 @@
 # gamification/services.py
 from django.utils import timezone
 from datetime import timedelta
+
+from .squad_mission_services import SquadMissionService
 from ..models import UserMission, Mission
 from ..utils import get_user_current_date
 import random
@@ -70,29 +72,51 @@ class MissionResetService:
         return False
 
     @staticmethod
+    def _ensure_user_squad_missions(user, cycle_date, cycle_type):
+        """
+        Ensure all squads the user belongs to have squad missions for this cycle
+        """
+        from squads.models import SquadMember
+
+        # ✅ Changed: Use squads_members instead of squad_members
+        user_squad_memberships = SquadMember.objects.filter(
+            user=user
+        ).select_related('squad')
+
+        for membership in user_squad_memberships:
+            try:
+                SquadMissionService.ensure_squad_has_missions(
+                    squad=membership.squad,
+                    cycle_date=cycle_date,
+                    cycle_type=cycle_type
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error ensuring squad missions for squad {membership.squad.id}: {str(e)}",
+                    exc_info=True
+                )
+
+    @staticmethod
     def _create_daily_missions(user, cycle_date):
-        """Create daily missions for user"""
+        """Create daily missions for user - only INDIVIDUAL missions with random pool"""
+        # ✅ Only get INDIVIDUAL daily missions that are in random pool
         daily_missions = Mission.objects.filter(
             cycle='daily',
-            is_active=True
+            access_type='individual',
+            is_active=True,
+            is_random_pool=True
         )
 
         if not daily_missions.exists():
-            logger.warning("No active daily missions found")
+            logger.warning("No active individual daily missions in random pool found")
             return
 
-        # Get missions that are in random pool
-        pool_missions = daily_missions.filter(is_random_pool=True)
-
-        if pool_missions.exists():
-            pool_size = pool_missions.first().pool_size
-            selected_missions = random.sample(
-                list(pool_missions),
-                min(pool_size, pool_missions.count())
-            )
-        else:
-            # If no pool, assign all daily missions
-            selected_missions = list(daily_missions)
+        # Get pool size from first mission
+        pool_size = daily_missions.first().pool_size
+        selected_missions = random.sample(
+            list(daily_missions),
+            min(pool_size, daily_missions.count())
+        )
 
         # Create missions
         created_missions = []
@@ -107,7 +131,7 @@ class MissionResetService:
             created_missions.append(user_mission)
 
         logger.info(
-            f"Created {len(created_missions)} daily missions for user {user.username} "
+            f"Created {len(created_missions)} individual daily missions for user {user.username} "
             f"for date {cycle_date}"
         )
 
@@ -115,14 +139,16 @@ class MissionResetService:
 
     @staticmethod
     def _create_weekly_missions(user, cycle_date):
-        """Create weekly missions for user"""
+        """Create weekly missions for user - only INDIVIDUAL missions"""
+        # ✅ Only get INDIVIDUAL weekly missions (no random pool needed for weekly)
         weekly_missions = Mission.objects.filter(
             cycle='weekly',
+            access_type='individual',
             is_active=True
         )
 
         if not weekly_missions.exists():
-            logger.warning("No active weekly missions found")
+            logger.warning("No active individual weekly missions found")
             return
 
         # Create all weekly missions
@@ -138,7 +164,7 @@ class MissionResetService:
             created_missions.append(user_mission)
 
         logger.info(
-            f"Created {len(created_missions)} weekly missions for user {user.username} "
+            f"Created {len(created_missions)} individual weekly missions for user {user.username} "
             f"for week of {cycle_date}"
         )
 
