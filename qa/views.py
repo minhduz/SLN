@@ -11,6 +11,7 @@ from django.db.models import Q
 
 from .models import Subject, Question, Answer, QuestionFileAttachment, UserQuestionView
 from .tasks import generate_question_embedding
+from economy.services.pricing_service import PricingService
 
 from .services.chatbot_agent import get_chatbot
 from .services.chatbot_utils import (
@@ -182,9 +183,23 @@ class ChatWithBotView(APIView):
     Returns token information and attachment info for frontend
     """
     permission_classes = [IsAuthenticated]
+    CHAT_COST_CURRENCY = "diamond"
+    CHAT_COST_AMOUNT = 2
 
     def post(self, request):
         try:
+            # Check if user has sufficient diamonds
+            if not PricingService.has_sufficient_currency(request.user, self.CHAT_COST_CURRENCY, self.CHAT_COST_AMOUNT):
+                remaining = PricingService.get_user_balance(request.user, self.CHAT_COST_CURRENCY)
+                return Response(
+                    {
+                        "error": f"Insufficient {self.CHAT_COST_CURRENCY}",
+                        "required": self.CHAT_COST_AMOUNT,
+                        "available": remaining
+                    },
+                    status=status.HTTP_402_PAYMENT_REQUIRED
+                )
+
             # Use request.data for form data instead of JSON
             serializer = ChatWithBotRequestSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
@@ -230,6 +245,13 @@ class ChatWithBotView(APIView):
                 user_id=str(request.user.id),
                 thread_id=thread_id,
                 file_attachments=file_attachments
+            )
+
+            # Deduct currency after successful chat
+            deduct_result = PricingService.deduct_currency(
+                request.user,
+                self.CHAT_COST_CURRENCY,
+                self.CHAT_COST_AMOUNT
             )
 
             response_data = {

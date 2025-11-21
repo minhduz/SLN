@@ -12,6 +12,7 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from .tasks import recalculate_quiz_rating
 from gamification.mixins import MissionTrackingMixin
+from economy.services.pricing_service import PricingService
 
 from .models import Quiz, QuizQuestion, QuizAnswerOption, QuizAttempt, QuizAttemptAnswer
 from .serializers import (
@@ -97,6 +98,8 @@ class GenerateAIQuizView(generics.CreateAPIView):
 
     Returns the generated quiz data that can be previewed before saving
 
+    Costs 5 diamonds per quiz generation
+
     POST /api/learning/quiz/generate-ai/
     Request Body:
     {
@@ -125,11 +128,24 @@ class GenerateAIQuizView(generics.CreateAPIView):
             "id": "...",
             "name": "...",
             "description": "..."
-        }
+        },
+        "currency_deducted": true,
+        "remaining_balance": 45
+    }
+
+    Error Response (HTTP 402):
+    {
+        "success": false,
+        "error": "Insufficient diamond",
+        "required": 5,
+        "available": 2
     }
     """
     permission_classes = [IsAuthenticated]
     serializer_class = GenerateAIQuizSerializer
+
+    QUIZ_GENERATION_COST = 5
+    COST_CURRENCY = "diamond"
 
     def create(self, request, *args, **kwargs):
         """Generate AI quiz without saving to database"""
@@ -137,6 +153,26 @@ class GenerateAIQuizView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
 
         try:
+            # ✅ Check if user has sufficient diamonds
+            if not PricingService.has_sufficient_currency(
+                    request.user,
+                    self.COST_CURRENCY,
+                    self.QUIZ_GENERATION_COST
+            ):
+                remaining_balance = PricingService.get_user_balance(
+                    request.user,
+                    self.COST_CURRENCY
+                )
+                return Response(
+                    {
+                        "success": False,
+                        "error": f"Insufficient {self.COST_CURRENCY}",
+                        "required": self.QUIZ_GENERATION_COST,
+                        "available": remaining_balance
+                    },
+                    status=status.HTTP_402_PAYMENT_REQUIRED
+                )
+
             subject_id = serializer.validated_data.get('subject_id')
             num_questions = serializer.validated_data.get('num_questions', 10)
             language = serializer.validated_data.get('language', 'English')
@@ -162,10 +198,17 @@ class GenerateAIQuizView(generics.CreateAPIView):
             # Generate quiz (does NOT save to database)
             result = generator.generate_quiz(subject)
 
+            # ✅ Deduct currency after successful generation
+            deduct_result = PricingService.deduct_currency(
+                request.user,
+                self.COST_CURRENCY,
+                self.QUIZ_GENERATION_COST
+            )
+
             logger.info(
                 f"AI Quiz generated (not saved) with {num_questions} questions in {language} "
                 f"({options_per_question} options, {correct_answers_per_question} correct) "
-                f"for user {request.user.id}"
+                f"for user {request.user.id} - Deducted {self.QUIZ_GENERATION_COST} {self.COST_CURRENCY}"
             )
 
             return Response(
@@ -181,7 +224,9 @@ class GenerateAIQuizView(generics.CreateAPIView):
                         "id": str(result["subject"].id),
                         "name": result["subject"].name,
                         "description": result["subject"].description
-                    }
+                    },
+                    "currency_deducted": deduct_result["success"],
+                    "remaining_balance": deduct_result["remaining_balance"]
                 },
                 status=status.HTTP_200_OK
             )
@@ -642,6 +687,7 @@ class SearchQuizzesView(generics.ListAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
 class QuizQuestionListView(generics.ListAPIView):
     """
     API endpoint to list questions for a specific quiz
@@ -650,9 +696,14 @@ class QuizQuestionListView(generics.ListAPIView):
 
     Returns questions with attempt tracking.
     If max attempts reached (3), includes error message.
+
+    Costs 200 gold per quiz attempt (when loading questions to do quiz)
     """
     permission_classes = [IsAuthenticated]
     serializer_class = QuizQuestionSerializer
+
+    QUIZ_ATTEMPT_COST = 200
+    COST_CURRENCY = "gold"
 
     def get_queryset(self):
         quiz_id = self.kwargs.get('quiz_id')
@@ -688,9 +739,36 @@ class QuizQuestionListView(generics.ListAPIView):
             remaining_attempts = quiz.get_user_remaining_attempts(request.user)
             current_attempt_number = attempt_count + 1
 
+            # ✅ Check if user has sufficient gold BEFORE loading questions
+            if not PricingService.has_sufficient_currency(
+                    request.user,
+                    self.COST_CURRENCY,
+                    self.QUIZ_ATTEMPT_COST
+            ):
+                remaining_balance = PricingService.get_user_balance(
+                    request.user,
+                    self.COST_CURRENCY
+                )
+                return Response(
+                    {
+                        "success": False,
+                        "error": f"Insufficient {self.COST_CURRENCY}",
+                        "required": self.QUIZ_ATTEMPT_COST,
+                        "available": remaining_balance
+                    },
+                    status=status.HTTP_402_PAYMENT_REQUIRED
+                )
+
             # Get questions with attempt_number in context
             queryset = self.filter_queryset(self.get_queryset())
             serializer = self.get_serializer(queryset, many=True)
+
+            # ✅ Deduct gold after successfully loading questions
+            deduct_result = PricingService.deduct_currency(
+                request.user,
+                self.COST_CURRENCY,
+                self.QUIZ_ATTEMPT_COST
+            )
 
             # Base response structure
             response_data = {
@@ -699,7 +777,9 @@ class QuizQuestionListView(generics.ListAPIView):
                 "quiz_title": quiz.title,
                 "count": len(serializer.data),
                 "questions": serializer.data,
-                "attempt_number": current_attempt_number
+                "attempt_number": current_attempt_number,
+                "currency_deducted": deduct_result["success"],
+                "remaining_balance": deduct_result["remaining_balance"]
             }
 
             # Add error if max attempts reached
@@ -713,7 +793,8 @@ class QuizQuestionListView(generics.ListAPIView):
             else:
                 logger.info(
                     f"User {request.user.id} loaded quiz {quiz_id}. "
-                    f"Attempt {current_attempt_number}/3, Remaining: {remaining_attempts - 1} after this"
+                    f"Attempt {current_attempt_number}/3, Remaining: {remaining_attempts - 1} after this. "
+                    f"Deducted {self.QUIZ_ATTEMPT_COST} {self.COST_CURRENCY}"
                 )
 
             return Response(response_data, status=status.HTTP_200_OK)
@@ -890,6 +971,8 @@ class CreateQuizView(generics.CreateAPIView):
     API endpoint to create a new quiz (step 1: quiz information)
     Used as the first step for both manual creation and Excel import
 
+    Costs 1000 gold per quiz creation (one-time charge)
+
     POST /api/learning/quiz/create/
     {
         "title": "Biology Basics",
@@ -899,12 +982,43 @@ class CreateQuizView(generics.CreateAPIView):
     }
 
     Returns: Quiz object with id for use in next step
+
+    Error Response (HTTP 402):
+    {
+        "success": false,
+        "error": "Insufficient gold",
+        "required": 1000,
+        "available": 500
+    }
     """
     permission_classes = [IsAuthenticated]
     serializer_class = CreateQuizSerializer
 
+    QUIZ_CREATION_COST = 1000
+    COST_CURRENCY = "gold"
+
     def create(self, request, *args, **kwargs):
         try:
+            # ✅ Check if user has sufficient gold
+            if not PricingService.has_sufficient_currency(
+                    request.user,
+                    self.COST_CURRENCY,
+                    self.QUIZ_CREATION_COST
+            ):
+                remaining_balance = PricingService.get_user_balance(
+                    request.user,
+                    self.COST_CURRENCY
+                )
+                return Response(
+                    {
+                        "success": False,
+                        "error": f"Insufficient {self.COST_CURRENCY}",
+                        "required": self.QUIZ_CREATION_COST,
+                        "available": remaining_balance
+                    },
+                    status=status.HTTP_402_PAYMENT_REQUIRED
+                )
+
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
 
@@ -918,7 +1032,17 @@ class CreateQuizView(generics.CreateAPIView):
                 quiz_type='human'
             )
 
-            logger.info(f"Quiz {quiz.id} created by user {request.user.id}")
+            # ✅ Deduct currency after successful creation
+            deduct_result = PricingService.deduct_currency(
+                request.user,
+                self.COST_CURRENCY,
+                self.QUIZ_CREATION_COST
+            )
+
+            logger.info(
+                f"Quiz {quiz.id} created by user {request.user.id} - "
+                f"Deducted {self.QUIZ_CREATION_COST} {self.COST_CURRENCY}"
+            )
 
             return Response(
                 {
@@ -931,7 +1055,9 @@ class CreateQuizView(generics.CreateAPIView):
                         "subject": str(quiz.subject.id),
                         "language": quiz.language,
                         "quiz_type": quiz.quiz_type
-                    }
+                    },
+                    "currency_deducted": deduct_result["success"],
+                    "remaining_balance": deduct_result["remaining_balance"]
                 },
                 status=status.HTTP_201_CREATED
             )
