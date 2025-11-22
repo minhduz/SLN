@@ -144,7 +144,6 @@ INSTALLED_APPS = [
     'squads',
     'gamification',
     'learning',
-    'moderation',
 ]
 
 MIDDLEWARE = [
