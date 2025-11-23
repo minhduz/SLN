@@ -8,7 +8,8 @@ from .models import User
 from .serializers import (RegisterSerializer, UserSerializer,
                           CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer,
                           LogoutSerializer, UserProfileSerializer
-                          ,UpdateUserSerializer, SendOTPSerializer, VerifyOTPSerializer, UserSearchSerializer)
+                          ,UpdateUserSerializer, SendOTPSerializer, VerifyOTPSerializer,
+                          UserSearchSerializer, ChangePasswordSerializer)
 
 from .services.user_service import UserService
 
@@ -48,6 +49,33 @@ class UpdateUserView(generics.UpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+class ChangePasswordView(APIView):
+    """
+    API endpoint for changing user password.
+    Requires authentication and validation of old password.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        old_password = serializer.validated_data['old_password']
+        new_password = serializer.validated_data['new_password']
+
+        try:
+            result = UserService.change_password(
+                request.user,
+                old_password,
+                new_password
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 class SendOTPView(APIView):
     permission_classes = [AllowAny]

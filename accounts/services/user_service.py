@@ -8,6 +8,7 @@ from ..models import User, UserVerification
 from django.core.files.storage import default_storage
 from ..tasks import delete_avatar_task
 from .otp_service import issue_otp, verify_otp, normalize_phone_to_e164
+import uuid
 
 def rename_and_save_avatar(user: User, avatar):
     """
@@ -15,7 +16,9 @@ def rename_and_save_avatar(user: User, avatar):
     ensuring consistency across create and update.
     """
     ext = os.path.splitext(avatar.name)[1].lower()
-    avatar_filename = f"avatars/{user.id}{ext}"
+    # ✅ Add random UUID to make filename unique
+    unique_id = uuid.uuid4().hex[:8]  # Use first 8 chars of UUID
+    avatar_filename = f"avatars/{user.id}_{unique_id}{ext}"
     saved_path = default_storage.save(avatar_filename, avatar)
     return saved_path
 
@@ -124,3 +127,18 @@ class UserService:
         queryset = queryset.order_by('username')[:limit]
 
         return list(queryset)
+
+    @staticmethod
+    def change_password(user: User, old_password: str, new_password: str) -> dict:
+        """
+        Change user password with old password verification.
+        Raises ValueError if old password is incorrect.
+        """
+        if not user.check_password(old_password):
+            raise ValueError("Old password is incorrect")
+
+        user.set_password(new_password)
+        user.save(update_fields=['password'])
+
+        return {"message": "Password changed successfully"}
+

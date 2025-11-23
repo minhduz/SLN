@@ -37,6 +37,42 @@ class UpdateUserSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         return update_user(instance, validated_data)
 
+class ChangePasswordSerializer(serializers.Serializer):
+    """
+    Serializer for change password endpoint.
+    Requires old password and new password.
+    """
+    old_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        help_text="Current password"
+    )
+    new_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        min_length=8,
+        help_text="New password (minimum 8 characters)"
+    )
+    confirm_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        help_text="Confirm new password"
+    )
+
+    def validate(self, data):
+        """Validate that new passwords match"""
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError(
+                {"confirm_password": "Passwords do not match"}
+            )
+
+        if data['old_password'] == data['new_password']:
+            raise serializers.ValidationError(
+                {"new_password": "New password cannot be the same as old password"}
+            )
+
+        return data
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         # ✅ First, manually authenticate to check if user exists (even if inactive)
