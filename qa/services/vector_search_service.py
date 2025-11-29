@@ -138,7 +138,6 @@ class VectorSearchService:
                             'subject_name': question.subject.name if question.subject else None,
                             'subject_id': str(question.subject.id) if question.subject else None,
                             'user_name': question.user.username if question.user else 'Anonymous',
-                            'popularity_score': question.popularity_score,
                             'created_at': question.created_at,
                             'answer_count': question.answers.count(),
                             'is_public': question.is_public

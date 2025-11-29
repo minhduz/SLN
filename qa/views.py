@@ -169,19 +169,6 @@ class VectorSearchStatsView(APIView):
             )
 
 class ChatWithBotView(APIView):
-    """
-    API endpoint to chat with the Smart Learning System chatbot with file upload support
-
-    POST /api/chat/
-    Content-Type: multipart/form-data
-
-    Form fields:
-    - message: "What is photosynthesis?"
-    - thread_id: "optional-thread-id"
-    - files: [file1, file2, ...] (optional, max 5 files)
-
-    Returns token information and attachment info for frontend
-    """
     permission_classes = [IsAuthenticated]
     CHAT_COST_CURRENCY = "diamond"
     CHAT_COST_AMOUNT = 2

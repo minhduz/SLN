@@ -93,54 +93,6 @@ class QuizOwnershipMixin:
         return None
 
 class GenerateAIQuizView(generics.CreateAPIView):
-    """
-    API endpoint to generate an AI quiz WITHOUT saving to database
-
-    Returns the generated quiz data that can be previewed before saving
-
-    Costs 5 diamonds per quiz generation
-
-    POST /api/learning/quiz/generate-ai/
-    Request Body:
-    {
-        "subject_id": "optional-uuid",
-        "num_questions": 15,
-        "language": "English",
-        "description": "Optional custom description",
-        "options_per_question": 2,
-        "correct_answers_per_question": 1
-    }
-
-    Response:
-    {
-        "success": true,
-        "message": "Quiz generated successfully",
-        "num_questions": 15,
-        "language": "English",
-        "options_per_question": 2,
-        "correct_answers_per_question": 1,
-        "quiz_data": {
-            "title": "...",
-            "description": "...",
-            "questions": [...]
-        },
-        "subject": {
-            "id": "...",
-            "name": "...",
-            "description": "..."
-        },
-        "currency_deducted": true,
-        "remaining_balance": 45
-    }
-
-    Error Response (HTTP 402):
-    {
-        "success": false,
-        "error": "Insufficient diamond",
-        "required": 5,
-        "available": 2
-    }
-    """
     permission_classes = [IsAuthenticated]
     serializer_class = GenerateAIQuizSerializer
 
