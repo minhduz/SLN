@@ -86,11 +86,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         try:
             user = User.objects.get(username=username)
         except User.DoesNotExist:
-            raise serializers.ValidationError("Invalid credentials")
+            raise serializers.ValidationError("Invalid credentials, wrong username or password")
 
         # Check if password is correct
         if not user.check_password(password):
-            raise serializers.ValidationError("Invalid credentials")
+            raise serializers.ValidationError("Invalid credentials, wrong username or password")
 
         # ✅ Now check if account is active (our custom verification logic)
         if not user.is_active:

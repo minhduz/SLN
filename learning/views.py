@@ -6,12 +6,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from django.conf import settings
-import logging
+import logging,json
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from .tasks import recalculate_quiz_rating
-from gamification.mixins import MissionTrackingMixin
 from economy.services.pricing_service import PricingService
 
 from .models import Quiz, QuizQuestion, QuizAnswerOption, QuizAttempt, QuizAttemptAnswer
@@ -37,6 +36,7 @@ from .serializers import (
 from .service.quiz_service import AIQuizGenerator
 from .service.submit_service import QuizSubmitService
 from .service.file_service import ExcelQuizImporter
+from .service.avatar_service import QuizAvatarService
 from .service.random_quiz_service import get_random_quizzes_for_user,get_random_quizzes_by_subject
 from qa.models import Subject
 
@@ -205,34 +205,24 @@ class GenerateAIQuizView(generics.CreateAPIView):
 
 class SaveGeneratedQuizView(generics.CreateAPIView):
     """
-    API endpoint to save a generated quiz to database
-
-    Receives the quiz data from GenerateAIQuizView and saves it
+    API endpoint to save a generated quiz to database with optional avatar
 
     POST /api/learning/quiz/save-generated/
-    Request Body:
     {
         "subject_id": "uuid",
-        "quiz_data": {
-            "title": "...",
-            "description": "...",
-            "questions": [...]
-        },
+        "quiz_data": { ... },
         "num_questions": 15,
         "language": "English",
-        "options_per_question": 2,
-        "correct_answers_per_question": 1
+        "options_per_question": 4,
+        "correct_answers_per_question": 1,
+        "avatar": <image_file> (optional)
     }
 
     Response:
     {
         "success": true,
         "message": "Quiz saved successfully",
-        "quiz": {
-            "id": "...",
-            "title": "...",
-            ... (full quiz data with questions and options)
-        }
+        "quiz": { ... full quiz data with avatar ... }
     }
     """
     permission_classes = [IsAuthenticated]
@@ -250,11 +240,12 @@ class SaveGeneratedQuizView(generics.CreateAPIView):
             language = serializer.validated_data.get('language')
             options_per_question = serializer.validated_data.get('options_per_question')
             correct_answers_per_question = serializer.validated_data.get('correct_answers_per_question')
+            avatar = serializer.validated_data.get('avatar')
 
             # Get subject
             subject = Subject.objects.get(id=subject_id)
 
-            # Initialize generator (needed for save_quiz_to_database method)
+            # Initialize generator
             generator = AIQuizGenerator(
                 num_questions=num_questions,
                 language=language,
@@ -273,12 +264,18 @@ class SaveGeneratedQuizView(generics.CreateAPIView):
                 correct_answers_per_question=correct_answers_per_question
             )
 
+            # Handle avatar if provided
+            if avatar:
+                saved_path = QuizAvatarService.rename_and_save_quiz_avatar(quiz, avatar)
+                quiz.avatar.name = saved_path
+                quiz.save()
+                logger.info(f"Avatar added to quiz {quiz.id}: {saved_path}")
+
             # Serialize the saved quiz
             quiz_serializer = QuizSerializer(quiz)
 
             logger.info(
                 f"AI Quiz {quiz.id} saved to database with {num_questions} questions in {language} "
-                f"({options_per_question} options, {correct_answers_per_question} correct) "
                 f"by user {request.user.id}"
             )
 
@@ -639,7 +636,6 @@ class SearchQuizzesView(generics.ListAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
 class QuizQuestionListView(generics.ListAPIView):
     """
     API endpoint to list questions for a specific quiz
@@ -920,28 +916,18 @@ class UserQuizAttemptsView(generics.ListAPIView):
 
 class CreateQuizView(generics.CreateAPIView):
     """
-    API endpoint to create a new quiz (step 1: quiz information)
-    Used as the first step for both manual creation and Excel import
-
-    Costs 1000 gold per quiz creation (one-time charge)
+    API endpoint to create a new quiz with optional avatar
 
     POST /api/learning/quiz/create/
     {
         "title": "Biology Basics",
         "description": "An introductory biology quiz",
         "subject": "uuid-of-subject",
-        "language": "English"
+        "language": "English",
+        "avatar": <image_file> (optional)
     }
 
-    Returns: Quiz object with id for use in next step
-
-    Error Response (HTTP 402):
-    {
-        "success": false,
-        "error": "Insufficient gold",
-        "required": 1000,
-        "available": 500
-    }
+    Returns: Quiz object with id and avatar URL
     """
     permission_classes = [IsAuthenticated]
     serializer_class = CreateQuizSerializer
@@ -974,12 +960,8 @@ class CreateQuizView(generics.CreateAPIView):
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
 
-            # Create quiz with human type (for both manual and import)
-            quiz = Quiz.objects.create(
-                title=serializer.validated_data['title'],
-                description=serializer.validated_data.get('description', ''),
-                subject=serializer.validated_data['subject'],
-                language=serializer.validated_data.get('language', 'English'),
+            # Create quiz
+            quiz = serializer.save(
                 created_by=request.user,
                 quiz_type='human'
             )
@@ -996,18 +978,12 @@ class CreateQuizView(generics.CreateAPIView):
                 f"Deducted {self.QUIZ_CREATION_COST} {self.COST_CURRENCY}"
             )
 
+            quiz_data = QuizSerializer(quiz).data
             return Response(
                 {
                     "success": True,
                     "message": "Quiz created successfully",
-                    "quiz": {
-                        "id": str(quiz.id),
-                        "title": quiz.title,
-                        "description": quiz.description,
-                        "subject": str(quiz.subject.id),
-                        "language": quiz.language,
-                        "quiz_type": quiz.quiz_type
-                    },
+                    "quiz": quiz_data,
                     "currency_deducted": deduct_result["success"],
                     "remaining_balance": deduct_result["remaining_balance"]
                 },
@@ -1296,38 +1272,45 @@ class ImportQuestionsFromExcelView(generics.CreateAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-class DeleteQuizView(QuizOwnershipMixin, generics.DestroyAPIView):
+class DeleteQuizView(generics.DestroyAPIView):
     """
-    API endpoint to delete a quiz
-    Only the quiz owner (creator) can delete it
+    Delete a quiz and its avatar. Only quiz owner can delete.
 
     DELETE /api/learning/quiz/{quiz_id}/delete/
-
-    This will delete:
-    - The quiz itself
-    - All questions in the quiz
-    - All answer options for those questions
     """
     permission_classes = [IsAuthenticated]
     queryset = Quiz.objects.all()
     lookup_field = 'id'
     lookup_url_kwarg = 'quiz_id'
 
+    def get_object(self):
+        quiz = super().get_object()
+
+        # Check ownership
+        if quiz.created_by != self.request.user:
+            raise PermissionDenied("Only the quiz creator can delete this quiz")
+
+        return quiz
+
     def destroy(self, request, *args, **kwargs):
         try:
             instance = self.get_object()
 
-            # Check ownership
-            permission_error = self.check_permission_or_403(instance, request)
-            if permission_error:
-                return permission_error
-
             quiz_id = str(instance.id)
             quiz_title = instance.title
 
+            # Get avatar path before deletion
+            avatar_path = instance.avatar.name if instance.avatar else None
+
+            # Delete the quiz
             instance.delete()
 
-            logger.info(f"Quiz {quiz_id} deleted by owner {request.user.id}")
+            # Async cleanup avatar
+            if avatar_path:
+                QuizAvatarService.delete_quiz_avatar(avatar_path)
+                logger.info(f"Scheduled deletion of avatar: {avatar_path}")
+
+            logger.info(f"Quiz {quiz_id} deleted by user {request.user.id}")
 
             return Response(
                 {
@@ -1336,21 +1319,20 @@ class DeleteQuizView(QuizOwnershipMixin, generics.DestroyAPIView):
                 },
                 status=status.HTTP_200_OK
             )
+        except PermissionDenied as e:
+            return Response(
+                {"success": False, "error": str(e)},
+                status=status.HTTP_403_FORBIDDEN
+            )
         except Quiz.DoesNotExist:
             return Response(
-                {
-                    "success": False,
-                    "error": "Quiz not found"
-                },
+                {"success": False, "error": "Quiz not found"},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
             logger.error(f"Error in DeleteQuizView: {str(e)}")
             return Response(
-                {
-                    "success": False,
-                    "error": "Failed to delete quiz"
-                },
+                {"success": False, "error": "Failed to delete quiz"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -1361,7 +1343,7 @@ class EditQuizView(generics.UpdateAPIView):
     PATCH/PUT /api/learning/quiz/{quiz_id}/edit-unified/
 
     This endpoint allows you to:
-    1. Edit quiz metadata (title, description, subject, language)
+    1. Edit quiz metadata (title, description, subject, language, avatar)
     2. Add new questions
     3. Update existing questions
     4. Delete questions
@@ -1377,6 +1359,7 @@ class EditQuizView(generics.UpdateAPIView):
         "description": "Updated description",  // optional
         "subject_id": "uuid",  // optional
         "language": "Vietnamese",  // optional
+        "avatar": <image_file>,  // optional - multipart/form-data
         "questions": [  // optional
             {
                 "id": "existing-question-uuid",  // required for update/delete, null for create
@@ -1400,6 +1383,12 @@ class EditQuizView(generics.UpdateAPIView):
         "message": "Quiz updated successfully",
         "quiz": { ... full quiz data with questions and options ... }
     }
+
+    Error Response (HTTP 403):
+    {
+        "success": false,
+        "error": "Only the quiz creator can edit this quiz"
+    }
     """
     permission_classes = [IsAuthenticated]
     serializer_class = UnifiedEditQuizSerializer
@@ -1407,27 +1396,56 @@ class EditQuizView(generics.UpdateAPIView):
     lookup_field = 'id'
     lookup_url_kwarg = 'quiz_id'
 
+    def get_object(self):
+        """Get quiz and check ownership"""
+        quiz = super().get_object()
+
+        if quiz.created_by != self.request.user:
+            raise PermissionDenied("Only the quiz creator can edit this quiz")
+
+        return quiz
+
     def update(self, request, *args, **kwargs):
-        """Handle unified quiz edit"""
-        quiz = self.get_object()
-
-        # Check if user owns the quiz (optional - adjust based on your permissions)
-        # if quiz.created_by != request.user:
-        #     return Response(
-        #         {"success": False, "error": "You don't have permission to edit this quiz"},
-        #         status=status.HTTP_403_FORBIDDEN
-        #     )
-
-        serializer = self.get_serializer(quiz, data=request.data, partial=True)
-
         try:
+            logger.info("========== [EDIT QUIZ BACKEND DEBUG] ==========")
+            logger.info(f"User: {request.user.id}")
+            logger.info(f"Quiz ID: {kwargs.get('quiz_id')}")
+            logger.info(f"RAW request.data (BEFORE PARSE): {request.data}")
+
+            # ✅ Convert QueryDict → normal dict
+            data = {}
+
+            for key, value in request.data.lists():
+                # ✅ FIX FILE FIELD (take single file, not list)
+                if key == "avatar":
+                    data[key] = value[0]  # ✅ SINGLE FILE
+                else:
+                    data[key] = value[0] if len(value) == 1 else value
+
+            # ✅ Parse questions JSON safely
+            if 'questions' in data and isinstance(data['questions'], str):
+                try:
+                    data['questions'] = json.loads(data['questions'])
+                    logger.info("✅ QUESTIONS JSON PARSED SUCCESSFULLY")
+                except json.JSONDecodeError:
+                    return Response(
+                        {"success": False, "error": "Invalid questions JSON"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            logger.info(f"RAW request.data (AFTER PARSE): {data}")
+
+            quiz = self.get_object()
+
+            serializer = self.get_serializer(quiz, data=data, partial=True)
             serializer.is_valid(raise_exception=True)
+
+            logger.info(f"✅ VALIDATED DATA: {serializer.validated_data}")
+
             updated_quiz = serializer.save()
 
-            # Return the updated quiz with all questions and options
             quiz_serializer = QuizSerializer(updated_quiz)
 
-            logger.info(f"Quiz {quiz.id} updated successfully by user {request.user.id}")
 
             return Response(
                 {
@@ -1438,8 +1456,26 @@ class EditQuizView(generics.UpdateAPIView):
                 status=status.HTTP_200_OK
             )
 
+        except PermissionDenied as e:
+            return Response(
+                {
+                    "success": False,
+                    "error": str(e)
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        except ValidationError as e:
+            return Response(
+                {
+                    "success": False,
+                    "error": e.detail if hasattr(e, 'detail') else str(e)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         except Exception as e:
-            logger.error(f"Error updating quiz {quiz.id}: {str(e)}")
+            logger.error(f"❌ Error updating quiz {kwargs.get('quiz_id')}: {str(e)}")
             return Response(
                 {
                     "success": False,

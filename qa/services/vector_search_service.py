@@ -18,6 +18,7 @@ class VectorSearchService:
 
     def __init__(self):
         self.client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+        logger.info(f"APIKEY",settings.OPENAI_API_KEY)
         self.embedding_model = getattr(settings, 'EMBEDDING_MODEL', 'text-embedding-ada-002')
 
     def generate_query_embedding(self, query_text: str) -> List[float]:

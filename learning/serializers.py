@@ -2,8 +2,11 @@ from rest_framework import serializers
 from .models import Quiz, QuizQuestion, QuizAnswerOption, QuizAttempt, QuizAttemptAnswer
 from qa.models import Subject
 from accounts.models import User
-import random
+import random,logging
+from .service.avatar_service import QuizAvatarService
+from django.db import transaction
 
+logger = logging.getLogger(__name__)
 
 class QuizAnswerOptionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -77,7 +80,7 @@ class QuizDetailPreviewSerializer(serializers.ModelSerializer):
     class Meta:
         model = Quiz
         fields = [
-            'id', 'title', 'description', 'language', 'rating', 'rating_count',  # Added rating_count
+            'id', 'title','avatar', 'description', 'language', 'rating', 'rating_count',  # Added rating_count
             'subject', 'quiz_type', 'quiz_type_display', 'questions', 'created_by',
             'created_at', 'total_questions', 'preview_questions_count', 'preview_mode',
             'user_attempt_count', 'user_remaining_attempts', 'total_attempts_count'  # NEW fields
@@ -213,7 +216,7 @@ class QuizListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'description', 'language', 'rating', 'subject', 'quiz_type', 'quiz_type_display', 'question_count', 'created_by', 'created_at']
+        fields = ['id', 'title','avatar', 'description', 'language', 'rating', 'subject', 'quiz_type', 'quiz_type_display', 'question_count', 'created_by', 'created_at']
 
     def get_question_count(self, obj):
         return obj.questions.count()
@@ -276,13 +279,14 @@ class GenerateAIQuizSerializer(serializers.Serializer):
 
 
 class SaveGeneratedQuizSerializer(serializers.Serializer):
-    """Serializer for saving a generated quiz to database"""
+    """Serializer for saving a generated quiz to database with optional avatar"""
     subject_id = serializers.UUIDField(required=True)
     quiz_data = serializers.JSONField(required=True)
     num_questions = serializers.IntegerField(required=True, min_value=5, max_value=20)
     language = serializers.CharField(required=True, max_length=50)
     options_per_question = serializers.IntegerField(required=True, min_value=2, max_value=10)
     correct_answers_per_question = serializers.IntegerField(required=True, min_value=1)
+    avatar = serializers.ImageField(required=False, allow_null=True)
 
     def validate_subject_id(self, value):
         try:
@@ -317,6 +321,21 @@ class SaveGeneratedQuizSerializer(serializers.Serializer):
                 if field not in question:
                     raise serializers.ValidationError(f"Question {idx} must contain '{field}' field")
 
+        return value
+
+    def validate_avatar(self, value):
+        """Validate avatar if provided"""
+        if value:
+            # Check file size (max 5MB)
+            if value.size > 5 * 1024 * 1024:
+                raise serializers.ValidationError("Avatar file size must not exceed 5MB")
+
+            # Check file type
+            allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp']
+            if value.content_type not in allowed_types:
+                raise serializers.ValidationError(
+                    "Avatar must be a valid image file (JPEG, PNG, JPG, or WebP)"
+                )
         return value
 
     def validate(self, data):
@@ -413,12 +432,13 @@ class UserQuizAttemptsSerializer(serializers.ModelSerializer):
 
 
 class CreateQuizSerializer(serializers.ModelSerializer):
-    """Serializer for creating a new quiz (used for both manual and import)"""
-    created_by = UserSerializer(read_only=True)
+    """Serializer for creating a new quiz with optional avatar"""
+    created_by = serializers.StringRelatedField(read_only=True)
+    avatar = serializers.ImageField(required=False, allow_null=True)
 
     class Meta:
         model = Quiz
-        fields = ['id', 'title', 'description', 'subject', 'language', 'created_by']
+        fields = ['id', 'title', 'description', 'subject', 'language', 'avatar', 'created_by']
         extra_kwargs = {
             'description': {'required': False, 'allow_blank': True}
         }
@@ -428,6 +448,37 @@ class CreateQuizSerializer(serializers.ModelSerializer):
         if value is None:
             raise serializers.ValidationError("Subject is required")
         return value
+
+    def validate_avatar(self, value):
+        """Validate avatar if provided"""
+        if value:
+            # Check file size (max 5MB)
+            if value.size > 5 * 1024 * 1024:
+                raise serializers.ValidationError("Avatar file size must not exceed 5MB")
+
+            # Check file type
+            allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp']
+            if value.content_type not in allowed_types:
+                raise serializers.ValidationError(
+                    "Avatar must be a valid image file (JPEG, PNG, JPG, or WebP)"
+                )
+        return value
+
+    def create(self, validated_data):
+        """Create quiz and handle avatar"""
+        avatar = validated_data.pop('avatar', None)
+
+        # Create quiz without avatar first
+        quiz = Quiz.objects.create(**validated_data)
+
+        # Handle avatar if provided
+        if avatar:
+            saved_path = QuizAvatarService.rename_and_save_quiz_avatar(quiz, avatar)
+            quiz.avatar.name = saved_path
+            quiz.save()
+
+        logger.info(f"Quiz {quiz.id} created by user {validated_data['created_by'].id}")
+        return quiz
 
 
 class AnswerOptionInputSerializer(serializers.Serializer):
@@ -572,10 +623,10 @@ class UnifiedQuestionSerializer(serializers.Serializer):
 
 class UnifiedEditQuizSerializer(serializers.Serializer):
     """
-    Unified serializer for editing quiz, questions, and answer options in one API call
+    Unified serializer for editing quiz, questions, and answer options with avatar support
 
     This allows you to:
-    - Edit quiz metadata (title, description, subject, language)
+    - Edit quiz metadata (title, description, subject, language, avatar)
     - Add/Update/Delete questions
     - Add/Update/Delete answer options
 
@@ -586,6 +637,7 @@ class UnifiedEditQuizSerializer(serializers.Serializer):
     description = serializers.CharField(allow_blank=True, required=False)
     subject_id = serializers.UUIDField(required=False)
     language = serializers.CharField(max_length=50, required=False)
+    avatar = serializers.ImageField(required=False, allow_null=True)
 
     # Questions (optional - include to modify questions)
     questions = UnifiedQuestionSerializer(many=True, required=False)
@@ -621,6 +673,21 @@ class UnifiedEditQuizSerializer(serializers.Serializer):
             return value.strip()
         return value
 
+    def validate_avatar(self, value):
+        """Validate avatar if provided"""
+        if value:
+            # Check file size (max 5MB)
+            if value.size > 5 * 1024 * 1024:
+                raise serializers.ValidationError("Avatar file size must not exceed 5MB")
+
+            # Check file type
+            allowed_types = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+            if value.content_type not in allowed_types:
+                raise serializers.ValidationError(
+                    "Avatar must be a valid image file (JPEG, PNG, GIF, or WebP)"
+                )
+        return value
+
     def validate_questions(self, value):
         """Validate questions if provided"""
         if value:
@@ -630,108 +697,128 @@ class UnifiedEditQuizSerializer(serializers.Serializer):
                 raise serializers.ValidationError("Quiz must have at least one question")
         return value
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         """
-        Update quiz, questions, and answer options
+        Update quiz, questions, and answer options with avatar support
 
         Handles:
-        - Quiz metadata updates
+        - Quiz metadata updates (including avatar)
         - Question CRUD operations
         - Answer option CRUD operations
         """
-        from django.db import transaction
 
-        with transaction.atomic():
-            # ========== UPDATE QUIZ METADATA ==========
-            if 'title' in validated_data:
-                instance.title = validated_data['title']
 
-            if 'description' in validated_data:
-                instance.description = validated_data['description']
+        avatar = validated_data.pop('avatar', None)
 
-            if 'subject_id' in validated_data:
-                instance.subject = Subject.objects.get(id=validated_data['subject_id'])
+        # ========== HANDLE AVATAR ==========
+        old_avatar = None
+        if avatar and instance.pk:
+            old_avatar_obj = Quiz.objects.only("avatar").get(pk=instance.pk)
+            old_avatar = old_avatar_obj.avatar
+            logger.info(f"Old avatar: {old_avatar.name if old_avatar else 'None'}")
 
-            if 'language' in validated_data:
-                instance.language = validated_data['language']
+        # ========== UPDATE QUIZ METADATA ==========
+        if 'title' in validated_data:
+            instance.title = validated_data['title']
 
-            instance.save()
+        if 'description' in validated_data:
+            instance.description = validated_data['description']
 
-            # ========== PROCESS QUESTIONS ==========
-            if 'questions' in validated_data:
-                questions_data = validated_data['questions']
+        if 'subject_id' in validated_data:
+            instance.subject = Subject.objects.get(id=validated_data['subject_id'])
 
-                for question_data in questions_data:
-                    action = question_data.get('_action', 'keep')
-                    question_id = question_data.get('id')
+        if 'language' in validated_data:
+            instance.language = validated_data['language']
 
-                    if action == 'delete' and question_id:
-                        # DELETE existing question
-                        QuizQuestion.objects.filter(id=question_id, quiz=instance).delete()
+        # ========== SAVE AVATAR IF PROVIDED ==========
+        if avatar:
+            saved_path = QuizAvatarService.rename_and_save_quiz_avatar(instance, avatar)
+            logger.info(f"Saved to: {saved_path}")
+            instance.avatar.name = saved_path
 
-                    elif action == 'create':
-                        # CREATE new question
-                        question = QuizQuestion.objects.create(
-                            quiz=instance,
-                            question_text=question_data['question_text']
+        instance.save()
+
+        # ========== SCHEDULE OLD AVATAR DELETION ==========
+        if avatar and old_avatar:
+            logger.info(f"Scheduling deletion of old avatar: {old_avatar.name}")
+            QuizAvatarService.delete_quiz_avatar(old_avatar.name)
+
+        # ========== PROCESS QUESTIONS ==========
+        if 'questions' in validated_data:
+            questions_data = validated_data['questions']
+
+            for question_data in questions_data:
+                action = question_data.get('_action', 'keep')
+                question_id = question_data.get('id')
+
+                if action == 'delete' and question_id:
+                    # DELETE existing question
+                    QuizQuestion.objects.filter(id=question_id, quiz=instance).delete()
+
+                elif action == 'create':
+                    # CREATE new question
+                    question = QuizQuestion.objects.create(
+                        quiz=instance,
+                        question_text=question_data['question_text']
+                    )
+
+                    # Create answer options for new question
+                    for option_data in question_data['answer_options']:
+                        QuizAnswerOption.objects.create(
+                            question=question,
+                            option_text=option_data['option_text'],
+                            is_correct=option_data['is_correct']
                         )
 
-                        # Create answer options for new question
-                        for option_data in question_data['answer_options']:
-                            QuizAnswerOption.objects.create(
-                                question=question,
-                                option_text=option_data['option_text'],
-                                is_correct=option_data['is_correct']
-                            )
+                elif action in ['update', 'keep'] and question_id:
+                    # UPDATE existing question
+                    try:
+                        question = QuizQuestion.objects.get(id=question_id, quiz=instance)
 
-                    elif action in ['update', 'keep'] and question_id:
-                        # UPDATE existing question
-                        try:
-                            question = QuizQuestion.objects.get(id=question_id, quiz=instance)
+                        # Update question text if changed
+                        if 'question_text' in question_data:
+                            question.question_text = question_data['question_text']
+                            question.save()
 
-                            # Update question text if changed
-                            if 'question_text' in question_data:
-                                question.question_text = question_data['question_text']
-                                question.save()
+                        # Process answer options
+                        if 'answer_options' in question_data:
+                            answer_options_data = question_data['answer_options']
 
-                            # Process answer options
-                            if 'answer_options' in question_data:
-                                answer_options_data = question_data['answer_options']
+                            for option_data in answer_options_data:
+                                option_action = option_data.get('_action', 'keep')
+                                option_id = option_data.get('id')
 
-                                for option_data in answer_options_data:
-                                    option_action = option_data.get('_action', 'keep')
-                                    option_id = option_data.get('id')
+                                if option_action == 'delete' and option_id:
+                                    # DELETE existing option
+                                    QuizAnswerOption.objects.filter(
+                                        id=option_id,
+                                        question=question
+                                    ).delete()
 
-                                    if option_action == 'delete' and option_id:
-                                        # DELETE existing option
-                                        QuizAnswerOption.objects.filter(
+                                elif option_action == 'create':
+                                    # CREATE new option
+                                    QuizAnswerOption.objects.create(
+                                        question=question,
+                                        option_text=option_data['option_text'],
+                                        is_correct=option_data['is_correct']
+                                    )
+
+                                elif option_action in ['update', 'keep'] and option_id:
+                                    # UPDATE existing option
+                                    try:
+                                        option = QuizAnswerOption.objects.get(
                                             id=option_id,
                                             question=question
-                                        ).delete()
-
-                                    elif option_action == 'create':
-                                        # CREATE new option
-                                        QuizAnswerOption.objects.create(
-                                            question=question,
-                                            option_text=option_data['option_text'],
-                                            is_correct=option_data['is_correct']
                                         )
+                                        option.option_text = option_data['option_text']
+                                        option.is_correct = option_data['is_correct']
+                                        option.save()
+                                    except QuizAnswerOption.DoesNotExist:
+                                        pass  # Skip if option doesn't exist
 
-                                    elif option_action in ['update', 'keep'] and option_id:
-                                        # UPDATE existing option
-                                        try:
-                                            option = QuizAnswerOption.objects.get(
-                                                id=option_id,
-                                                question=question
-                                            )
-                                            option.option_text = option_data['option_text']
-                                            option.is_correct = option_data['is_correct']
-                                            option.save()
-                                        except QuizAnswerOption.DoesNotExist:
-                                            pass  # Skip if option doesn't exist
-
-                        except QuizQuestion.DoesNotExist:
-                            pass  # Skip if question doesn't exist
+                    except QuizQuestion.DoesNotExist:
+                        pass  # Skip if question doesn't exist
 
         return instance
 

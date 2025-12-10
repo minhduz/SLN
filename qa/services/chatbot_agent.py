@@ -28,7 +28,6 @@ class ChatbotState(MessagesState):
     temp_attachment_ids: List[str]
     full_conversation_history: List[Dict[str, str]]  # Lightweight Q&A storage (not sent to model)
 
-
 class SmartLearningChatbot:
     """Smart Learning System Chatbot with memory management, token tracking, and database integration"""
 

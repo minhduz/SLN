@@ -30,6 +30,7 @@ class Quiz(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    avatar = models.ImageField(upload_to='quiz_avatars/', blank=True, null=True)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='quizzes')
     quiz_type = models.CharField(max_length=10, choices=QUIZ_TYPE_CHOICES, default='human')
     language = models.CharField(max_length=50, choices=LANGUAGE_CHOICES, default='English')
